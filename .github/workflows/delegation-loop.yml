@@ -2,7 +2,6 @@ name: Delegation loop
 
 on:
   push:
-    branches: [main]
     paths:
       - "import-templates/**"
       - "src/**"
