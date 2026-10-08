@@ -141,4 +141,30 @@ public sealed class MdiFhirMapperTests
         Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["meta"]!["profile"]!.AsArray().Any(profile => profile!.GetValue<string>().Contains("vrdr-autopsy-performed-indicator", StringComparison.Ordinal)));
         Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Patient" && entry!["resource"]!["address"] is not null);
     }
+
+    [Fact]
+    public void UsesAbsoluteResourceUrisForNonUuidResourceIds()
+    {
+        ImportRecord record = new();
+        record.Fields["BASEFHIRID"] = "MDI-DEV-GOLDENSET-HanSolo-MDIEDRS";
+        record.Fields["Decedent Name"] = "Han Solo";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        string subjectReference = bundle["entry"]![0]! ["resource"]!["subject"]!["reference"]!.GetValue<string>();
+        Assert.StartsWith("https://mdi.local/fhir/Patient/", subjectReference, StringComparison.Ordinal);
+        foreach (string value in StringValues(bundle))
+        {
+            if (value.StartsWith("urn:uuid:", StringComparison.Ordinal))
+                Assert.True(Guid.TryParse(value[9..], out _), $"Invalid UUID URI: {value}");
+        }
+    }
+
+    private static IEnumerable<string> StringValues(JsonNode? node)
+    {
+        if (node is JsonValue value && value.TryGetValue<string>(out string? scalar) && scalar is not null) yield return scalar;
+        if (node is JsonObject obj)
+            foreach (JsonNode? child in obj.Select(item => item.Value)) foreach (string itemText in StringValues(child)) yield return itemText;
+        if (node is JsonArray array)
+            foreach (JsonNode? child in array) foreach (string itemText in StringValues(child)) yield return itemText;
+    }
 }

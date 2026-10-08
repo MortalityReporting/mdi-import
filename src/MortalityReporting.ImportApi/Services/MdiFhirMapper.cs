@@ -7,6 +7,7 @@ using GaTech.Chai.Vrcl;
 using GaTech.Chai.Vrdr;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
+using MortalityReporting.ImportApi.Configuration;
 using MortalityReporting.ImportApi.Models;
 
 namespace MortalityReporting.ImportApi.Services;
@@ -14,6 +15,12 @@ namespace MortalityReporting.ImportApi.Services;
 public sealed class MdiFhirMapper
 {
     private readonly object registryLock = new();
+    private readonly string resourceUriBase;
+
+    public MdiFhirMapper(ImportApiOptions? options = null)
+    {
+        resourceUriBase = (options?.ResourceUriBase ?? "https://mdi.local/fhir").TrimEnd('/');
+    }
 
     public JsonObject Map(ImportRecord record)
     {
@@ -27,7 +34,48 @@ public sealed class MdiFhirMapper
                 _ => MapMdi(record)
             };
             string json = new FhirJsonSerializer(new SerializerSettings { Pretty = false }).SerializeToString(bundle);
-            return JsonNode.Parse(json)?.AsObject() ?? throw new InvalidOperationException("FHIR serializer returned invalid JSON.");
+            JsonObject result = JsonNode.Parse(json)?.AsObject() ?? throw new InvalidOperationException("FHIR serializer returned invalid JSON.");
+            RewriteResourceUris(result);
+            return result;
+        }
+    }
+
+    private void RewriteResourceUris(JsonObject root)
+    {
+        Dictionary<string, string> replacements = [];
+        CollectResourceUris(root, replacements);
+        ReplaceResourceUris(root, replacements);
+    }
+
+    private void CollectResourceUris(JsonNode? node, Dictionary<string, string> replacements)
+    {
+        if (node is JsonObject obj)
+        {
+            if (obj["resourceType"]?.GetValue<string>() is { } resourceType && obj["id"]?.GetValue<string>() is { } id)
+                replacements[$"urn:uuid:{id}"] = $"{resourceUriBase}/{resourceType}/{Uri.EscapeDataString(id)}";
+            foreach (JsonNode? child in obj.Select(item => item.Value)) CollectResourceUris(child, replacements);
+        }
+        else if (node is JsonArray array)
+        {
+            foreach (JsonNode? child in array) CollectResourceUris(child, replacements);
+        }
+    }
+
+    private static void ReplaceResourceUris(JsonNode? node, IReadOnlyDictionary<string, string> replacements)
+    {
+        if (node is JsonObject obj)
+        {
+            foreach (string key in obj.Select(item => item.Key).ToList())
+            {
+                JsonNode? child = obj[key];
+                if (child is JsonValue value && value.TryGetValue<string>(out string? text) && text is not null && replacements.TryGetValue(text, out string? replacement))
+                    obj[key] = replacement;
+                else ReplaceResourceUris(child, replacements);
+            }
+        }
+        else if (node is JsonArray array)
+        {
+            foreach (JsonNode? child in array) ReplaceResourceUris(child, replacements);
         }
     }
 
@@ -95,7 +143,7 @@ public sealed class MdiFhirMapper
             section.Entry.Add(age.AsReference());
         }
         composition.CompositionMdiAndEdrs().MedicalHistory =
-            (null, new Narrative { Status = Narrative.NarrativeStatus.Generated, Div = "Medical history is not available." }, ListEmptyReason.Unavailable);
+            (null, new Narrative { Status = Narrative.NarrativeStatus.Generated, Div = "<div xmlns=\"http://www.w3.org/1999/xhtml\"><p>Medical history is not available.</p></div>" }, ListEmptyReason.Unavailable);
         List<Resource> examAutopsy = Resources(autopsy, autopsyLocation);
         composition.CompositionMdiAndEdrs().ExamAutopsy = SectionValue(examAutopsy);
 
