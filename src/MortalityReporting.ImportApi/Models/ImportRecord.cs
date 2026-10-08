@@ -19,7 +19,10 @@ public sealed class ImportRecord
     public ImportTemplateKind Kind { get; }
     public bool HasCaseSpecificData { get; set; }
     public Dictionary<string, string?> Fields { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> ExpectedFields { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, List<Dictionary<string, string?>>> Tables { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public IEnumerable<string> AllFieldNames => ExpectedFields.Concat(Fields.Keys).Distinct(StringComparer.OrdinalIgnoreCase);
 
     public string? Get(params string[] names)
     {

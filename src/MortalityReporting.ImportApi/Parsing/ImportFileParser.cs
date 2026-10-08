@@ -44,6 +44,7 @@ public sealed class ImportFileParser
             for (int index = 0; index < headers.Length; index++)
             {
                 if (string.IsNullOrWhiteSpace(headers[index])) continue;
+                record.ExpectedFields.Add(headers[index]);
                 record.Fields[headers[index]] = csv.GetField(index)?.Trim();
             }
             if (record.HasData) records.Add(record);
@@ -108,15 +109,22 @@ public sealed class ImportFileParser
         {
             string? section = Get(row, 0);
             string? element = Get(row, 1);
+            if (string.IsNullOrWhiteSpace(element) && ImportRecord.Normalize(section ?? "") != "fileid") continue;
             string? key = !string.IsNullOrWhiteSpace(element) ? element : section;
+            if (ImportRecord.Normalize(section ?? "") == "fileid") key = "File Id";
             if (string.IsNullOrWhiteSpace(key) || ImportRecord.Normalize(key) == "endofcases") continue;
 
             bool hasCaseValue = caseColumns.Any(column => !string.IsNullOrWhiteSpace(Get(row, column.Index)));
             if (!hasCaseValue && !string.IsNullOrWhiteSpace(section) && !string.IsNullOrWhiteSpace(element))
             {
-                foreach (ImportRecord record in records) record.Fields[section] = element;
+                foreach (ImportRecord record in records)
+                {
+                    record.ExpectedFields.Add(key);
+                    record.Fields[key] = element;
+                }
                 continue;
             }
+            foreach (ImportRecord record in records) record.ExpectedFields.Add(key);
             for (int index = 0; index < caseColumns.Count; index++)
             {
                 string? value = Get(row, caseColumns[index].Index);
@@ -141,6 +149,7 @@ public sealed class ImportFileParser
             for (int index = 0; index < headers.Length; index++)
             {
                 if (!string.IsNullOrWhiteSpace(headers[index])) record.Fields[headers[index]] = Get(row, index);
+                if (!string.IsNullOrWhiteSpace(headers[index])) record.ExpectedFields.Add(headers[index]);
             }
             if (record.HasData) records.Add(record);
         }
@@ -167,23 +176,32 @@ public sealed class ImportFileParser
             if (activeTable is not null && string.IsNullOrWhiteSpace(first) && tableHeaders.Count > 0)
             {
                 Dictionary<string, string?> tableRow = new(StringComparer.OrdinalIgnoreCase);
-                for (int index = 0; index < tableHeaders.Count; index++) tableRow[tableHeaders[index]] = Get(row, index + 1);
+                for (int index = 0; index < tableHeaders.Count; index++)
+                {
+                    tableRow[tableHeaders[index]] = Get(row, index + 1);
+                    record.ExpectedFields.Add($"{activeTable}[{record.Tables[activeTable].Count}].{tableHeaders[index]}");
+                }
                 if (tableRow.Values.Any(value => !string.IsNullOrWhiteSpace(value))) record.Tables[activeTable].Add(tableRow);
                 continue;
             }
             if (!string.IsNullOrWhiteSpace(first) && ImportRecord.Normalize(first) is "results" or "notes") { activeTable = null; }
-            if (!string.IsNullOrWhiteSpace(first) && !string.IsNullOrWhiteSpace(Get(row, 1)) && !ImportRecord.Normalize(first).Equals("laboratory", StringComparison.OrdinalIgnoreCase))
+            if (pendingLabelRow >= 0 && !string.IsNullOrWhiteSpace(first))
             {
-                record.Fields[first.Trim()] = Get(row, 1);
-            }
-            else if (ImportRecord.Normalize(first ?? "") == "fileid")
-            {
-                pendingLabelRow = rowIndex;
-            }
-            else if (pendingLabelRow >= 0 && !string.IsNullOrWhiteSpace(first))
-            {
+                record.ExpectedFields.Add("File Id");
                 record.Fields["File Id"] = first.Trim();
                 pendingLabelRow = -1;
+                continue;
+            }
+            string normalizedFirst = ImportRecord.Normalize(first ?? "");
+            bool isSection = normalizedFirst is "laboratory" or "decedent" or "generalcomments" or "agencyname";
+            if (!string.IsNullOrWhiteSpace(first) && !isSection)
+            {
+                record.ExpectedFields.Add(first.Trim());
+                record.Fields[first.Trim()] = Get(row, 1);
+            }
+            if (normalizedFirst == "fileid")
+            {
+                pendingLabelRow = rowIndex;
             }
         }
         return record;
@@ -195,6 +213,7 @@ public sealed class ImportFileParser
         for (int index = 0; index < source.Count; index++)
         {
             destination[index].HasCaseSpecificData |= source[index].HasCaseSpecificData;
+            foreach (string field in source[index].ExpectedFields) destination[index].ExpectedFields.Add(field);
             foreach ((string key, string? value) in source[index].Fields) destination[index].Fields[key] = value;
             foreach ((string key, List<Dictionary<string, string?>> value) in source[index].Tables) destination[index].Tables[key] = value;
         }

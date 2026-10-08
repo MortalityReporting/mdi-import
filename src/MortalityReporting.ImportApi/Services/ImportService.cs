@@ -16,6 +16,20 @@ public sealed class ImportService(ImportFileParser parser, MdiFhirMapper mapper,
             {
                 Fields = CreateFieldStatuses(record)
             };
+            List<string> validationErrors = response.Fields
+                .Where(field => field.Value.Errors.Count > 0)
+                .SelectMany(field => field.Value.Errors.Select(error => $"{field.Key}: {error}"))
+                .ToList();
+            if (validationErrors.Count > 0)
+            {
+                responses.Add(new ImportRecordResponse
+                {
+                    Fields = response.Fields,
+                    Errors = validationErrors,
+                    FhirResponse = new FhirSubmissionResponse { Name = DisplayName(record), Status = "Error", StatusCode = 422, State = "validation" }
+                });
+                continue;
+            }
             try
             {
                 JsonObject bundle = mapper.Map(record);
@@ -33,10 +47,24 @@ public sealed class ImportService(ImportFileParser parser, MdiFhirMapper mapper,
     private static Dictionary<string, FieldMappingStatus> CreateFieldStatuses(ImportRecord record)
     {
         Dictionary<string, FieldMappingStatus> fields = new(StringComparer.Ordinal);
-        foreach ((string key, string? value) in record.Fields)
+        foreach (string key in record.AllFieldNames.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
         {
-            string text = value ?? "";
-            fields[key] = new FieldMappingStatus { Status = string.IsNullOrWhiteSpace(text) ? "not mapped" : "mapped", Value = text };
+            string text = record.Fields.GetValueOrDefault(key) ?? "";
+            List<string> errors = ImportFieldValidator.Validate(key, text).ToList();
+            fields[key] = new FieldMappingStatus { Status = string.IsNullOrWhiteSpace(text) || errors.Count > 0 ? "not mapped" : "mapped", Value = text, Errors = errors };
+        }
+        foreach ((string table, List<Dictionary<string, string?>> rows) in record.Tables)
+        {
+            for (int rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+            {
+                foreach ((string key, string? value) in rows[rowIndex])
+                {
+                    string fieldName = $"{table}[{rowIndex}].{key}";
+                    string text = value ?? "";
+                    List<string> errors = ImportFieldValidator.Validate(fieldName, text).ToList();
+                    fields[fieldName] = new FieldMappingStatus { Status = string.IsNullOrWhiteSpace(text) || errors.Count > 0 ? "not mapped" : "mapped", Value = text, Errors = errors };
+                }
+            }
         }
         return fields;
     }
