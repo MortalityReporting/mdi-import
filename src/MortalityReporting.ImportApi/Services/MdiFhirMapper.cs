@@ -7,7 +7,6 @@ using GaTech.Chai.Vrcl;
 using GaTech.Chai.Vrdr;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
-using MortalityReporting.ImportApi.Configuration;
 using MortalityReporting.ImportApi.Models;
 
 namespace MortalityReporting.ImportApi.Services;
@@ -15,12 +14,6 @@ namespace MortalityReporting.ImportApi.Services;
 public sealed class MdiFhirMapper
 {
     private readonly object registryLock = new();
-    private readonly string resourceUriBase;
-
-    public MdiFhirMapper(ImportApiOptions? options = null)
-    {
-        resourceUriBase = (options?.ResourceUriBase ?? "https://mdi.local/fhir").TrimEnd('/');
-    }
 
     public JsonObject Map(ImportRecord record)
     {
@@ -52,7 +45,7 @@ public sealed class MdiFhirMapper
         if (node is JsonObject obj)
         {
             if (obj["resourceType"]?.GetValue<string>() is { } resourceType && obj["id"]?.GetValue<string>() is { } id)
-                replacements[$"urn:uuid:{id}"] = $"{resourceUriBase}/{resourceType}/{Uri.EscapeDataString(id)}";
+                replacements[$"urn:uuid:{id}"] = $"{resourceType}/{id}";
             foreach (JsonNode? child in obj.Select(item => item.Value)) CollectResourceUris(child, replacements);
         }
         else if (node is JsonArray array)
@@ -273,8 +266,25 @@ public sealed class MdiFhirMapper
             _ => AdministrativeGender.Unknown
         };
         if (DateOnly(record.Get("BIRTHDATE", "Decedent DOB")) is { } birthDate) patient.BirthDate = birthDate;
+        string? ssn = record.Get("Decedent SSN", "SSN", "SSNNUMBER");
+        if (ssn is not null)
+        {
+            patient.Identifier.Add(new Identifier
+            {
+                Use = Identifier.IdentifierUse.Usual,
+                Type = new CodeableConcept("http://terminology.hl7.org/CodeSystem/v2-0203", "SB", "Social Beneficiary Identifier", ""),
+                System = "http://hl7.org/fhir/sid/us-ssn",
+                Value = ssn
+            });
+        }
         if (record.Get("MRNNUMBER") is { } mrn)
             patient.Identifier.Add(new Identifier("urn:mdi:mrn", mrn) { Use = Identifier.IdentifierUse.Usual, Type = new CodeableConcept("http://terminology.hl7.org/CodeSystem/v2-0203", "MR", "Medical record number", "") });
+        if (patient.Identifier.Count == 0)
+        {
+            Identifier absentIdentifier = new();
+            absentIdentifier.Extension.AddOrUpdateExtension("http://hl7.org/fhir/StructureDefinition/data-absent-reason", new Code("unknown"));
+            patient.Identifier.Add(absentIdentifier);
+        }
         if (BuildAddress(record, "RES") is { } address) patient.Address = [address];
         if (record.Get("LANGUAGE") is { } language) patient.Communication = [new Patient.CommunicationComponent { Language = new CodeableConcept { Text = language } }];
         if (record.Get("MARITAL", "Decedent Marital status") is { } marital) patient.MaritalStatus = new CodeableConcept { Text = marital };

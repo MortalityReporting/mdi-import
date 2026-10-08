@@ -189,3 +189,4 @@ cython_debug/
 
 # Local API response captures may contain sensitive data
 tests/*-response.json
+tests/MDI-To-EDRS-HanSolo.xlsx

@@ -31,6 +31,34 @@ public sealed class MdiFhirMapperTests
     }
 
     [Fact]
+    public void MapsSocialSecurityNumberToPatientIdentifier()
+    {
+        ImportRecord record = new();
+        record.Fields["BASEFHIRID"] = "case-ssn";
+        record.Fields["Decedent Name"] = "Han Solo";
+        record.Fields["Decedent SSN"] = "123-45-6789";
+
+        JsonObject patient = new MdiFhirMapper().Map(record)["entry"]!.AsArray()
+            .First(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Patient")!["resource"]!.AsObject();
+        Assert.Equal("http://hl7.org/fhir/sid/us-ssn", patient["identifier"]![0]! ["system"]!.GetValue<string>());
+        Assert.Equal("123-45-6789", patient["identifier"]![0]! ["value"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void AddsUnknownDataAbsentReasonWhenPatientHasNoIdentifier()
+    {
+        ImportRecord record = new();
+        record.Fields["BASEFHIRID"] = "case-no-id";
+        record.Fields["Decedent Name"] = "Han Solo";
+
+        JsonObject patient = new MdiFhirMapper().Map(record)["entry"]!.AsArray()
+            .First(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Patient")!["resource"]!.AsObject();
+        JsonObject extension = patient["identifier"]![0]!["extension"]![0]!.AsObject();
+        Assert.Equal("http://hl7.org/fhir/StructureDefinition/data-absent-reason", extension["url"]!.GetValue<string>());
+        Assert.Equal("unknown", extension["valueCode"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void MapsToxicologyTablesToMdiMessageBundle()
     {
         ImportRecord record = new(ImportTemplateKind.Toxicology);
@@ -151,7 +179,7 @@ public sealed class MdiFhirMapperTests
 
         JsonObject bundle = new MdiFhirMapper().Map(record);
         string subjectReference = bundle["entry"]![0]! ["resource"]!["subject"]!["reference"]!.GetValue<string>();
-        Assert.StartsWith("https://mdi.local/fhir/Patient/", subjectReference, StringComparison.Ordinal);
+        Assert.StartsWith("Patient/", subjectReference, StringComparison.Ordinal);
         foreach (string value in StringValues(bundle))
         {
             if (value.StartsWith("urn:uuid:", StringComparison.Ordinal))
