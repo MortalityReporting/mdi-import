@@ -61,6 +61,8 @@ public sealed class MdiFhirMapper
         Observation? tobacco = CreateTobacco(record, patient, id);
         Location? deathLocation = CreateLocation(record, id, false);
         Location? injuryLocation = CreateLocation(record, id, true);
+        Observation? autopsy = CreateAutopsy(record, patient, practitioner, id);
+        Location? autopsyLocation = CreateAutopsyLocation(record, id);
 
         Composition composition = CompositionMdiAndEdrs.Create(
             new Identifier("urn:mdi:case", caseKey), CompositionStatus.Final, patient, practitioner,
@@ -94,7 +96,8 @@ public sealed class MdiFhirMapper
         }
         composition.CompositionMdiAndEdrs().MedicalHistory =
             (null, new Narrative { Status = Narrative.NarrativeStatus.Generated, Div = "Medical history is not available." }, ListEmptyReason.Unavailable);
-        composition.CompositionMdiAndEdrs().ExamAutopsy = (null, null, ListEmptyReason.Unavailable);
+        List<Resource> examAutopsy = Resources(autopsy, autopsyLocation);
+        composition.CompositionMdiAndEdrs().ExamAutopsy = SectionValue(examAutopsy);
 
         Bundle bundle = BundleDocumentMdiAndEdrs.Create(new Identifier("urn:ietf:rfc:3986", $"urn:uuid:{Guid.NewGuid()}"), composition);
         bundle.Id = $"bundle-{id}";
@@ -172,6 +175,8 @@ public sealed class MdiFhirMapper
         Procedure? certification = CreateCertification(record, patient, practitioner, id);
         Location? deathLocation = CreateLocation(record, id, false);
         Location? injuryLocation = CreateLocation(record, id, true);
+        Observation? autopsy = CreateAutopsy(record, patient, practitioner, id);
+        Location? autopsyLocation = CreateAutopsyLocation(record, id);
 
         Composition composition = CompositionMdiDcr.Create(
             new Identifier("urn:mdi:case", caseKey), CompositionStatus.Preliminary, patient, submitter ?? practitioner);
@@ -182,7 +187,7 @@ public sealed class MdiFhirMapper
             composition.CompositionMdiDcr().EdrsFileNumber = ("urn:mdi:edrs", edrsCase);
 
         composition.CompositionMdiDcr().DecedentDemographics = (Resources(patient), null);
-        List<Resource?> investigationResources = [deathDate, manner, injury, deathLocation, injuryLocation];
+        List<Resource?> investigationResources = [deathDate, manner, injury, deathLocation, injuryLocation, autopsy, autopsyLocation];
         investigationResources.AddRange(causes);
         composition.CompositionMdiDcr().DeathInvestigation = (Resources(investigationResources.ToArray()), null);
         composition.CompositionMdiDcr().DeathCertification = (Resources(practitioner, submitter, certification), null);
@@ -404,13 +409,71 @@ public sealed class MdiFhirMapper
         location.Id = $"location-{id}-{(injury ? "injury" : "death")}"; location.Status = Location.LocationStatus.Active; location.Address = address ?? new Address { Text = text }; return location;
     }
 
+    private static Observation? CreateAutopsy(ImportRecord record, Patient patient, Practitioner practitioner, string id)
+    {
+        string? performed = record.Get("AUTOPSYPERFORMED", "Autopsy Performed?");
+        if (performed is null) return null;
+        Observation observation = new()
+        {
+            Id = $"observation-{id}-autopsy",
+            Status = ObservationStatus.Final,
+            Code = new CodeableConcept("http://loinc.org", "85699-7", "Autopsy was performed", ""),
+            Subject = patient.AsReference(),
+            Performer = [practitioner.AsReference()],
+            Value = YesNoUnknown(performed)
+        };
+        observation.AddProfile("http://hl7.org/fhir/us/vrdr/StructureDefinition/vrdr-autopsy-performed-indicator");
+        if (record.Get("AUTOPSYRESULTSAVAILABLE", "Autopsy Results Available?") is { } available)
+        {
+            observation.Component.Add(new Observation.ComponentComponent
+            {
+                Code = new CodeableConcept("http://loinc.org", "69436-4", "Autopsy results available", ""),
+                Value = YesNoUnknown(available)
+            });
+        }
+        return observation;
+    }
+
+    private static Location? CreateAutopsyLocation(ImportRecord record, string id)
+    {
+        string? name = record.Get("AUTOPSYPERFORMED_OFFICENAME", "Autopsy Performed Office Name");
+        Address? address = BuildAddress(record, "AUTOPSYLOCATION");
+        if (name is null && address is null) return null;
+        Location location = UsCoreLocation.Create(name ?? "Autopsy location");
+        location.Id = $"location-{id}-autopsy";
+        location.Status = Location.LocationStatus.Active;
+        if (address is not null) location.Address = address;
+        return location;
+    }
+
+    private static CodeableConcept YesNoUnknown(string value) => value.ToLowerInvariant() switch
+    {
+        "yes" => MdiVsYesNoUnknown.Yes,
+        "no" => MdiVsYesNoUnknown.No,
+        _ => MdiVsYesNoUnknown.UNK
+    };
+
     private static Address? BuildAddress(ImportRecord record, string prefix)
     {
-        string? street = record.Get($"{prefix}_STREET", $"{prefix}: Street"); string? city = record.Get($"{prefix}_CITY", $"{prefix}: City");
-        string? county = record.Get($"{prefix}_COUNTY", $"{prefix}: County"); string? state = record.Get($"{prefix}_STATE", $"{prefix}: State, U.S. Territory or Canadian Province");
-        string? zip = record.Get($"{prefix}_ZIP", $"{prefix}: Postal Code"); string? country = record.Get($"{prefix}_COUNTRY", $"{prefix}: Country");
+        string? street = AddressPart(record, prefix, "Street"); string? city = AddressPart(record, prefix, "City");
+        string? county = AddressPart(record, prefix, "County"); string? state = AddressPart(record, prefix, "State, U.S. Territory or Canadian Province");
+        string? zip = AddressPart(record, prefix, "Postal Code"); string? country = AddressPart(record, prefix, "Country");
         if (new[] { street, city, county, state, zip, country }.All(value => value is null)) return null;
         return new Address { Use = Address.AddressUse.Home, Line = street is null ? null : [street], City = city, District = county, State = state, PostalCode = zip, Country = country };
+    }
+
+    private static string? AddressPart(ImportRecord record, string prefix, string part)
+    {
+        List<string> names = [$"{prefix}_{part.ToUpperInvariant()}", $"{prefix}: {part}"];
+        switch (prefix)
+        {
+            case "RES": names.Add($"Decedent Residence: {part}"); break;
+            case "ME": names.Add($"Medical Examiner Office: {part}"); break;
+            case "DEATHLOCATION": names.Add($"Location of Death: {part}"); break;
+            case "INJURYLOCATION": names.Add($"Location of Injury: {part}"); break;
+            case "AUTOPSYLOCATION": names.Add($"Autopsy Performed Location: {part}"); break;
+        }
+        return record.Get(names.ToArray());
     }
 
     private static (List<string>, string?) Name(ImportRecord record)

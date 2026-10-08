@@ -186,3 +186,6 @@ cython_debug/
 
 # macOS metadata
 .DS_Store
+
+# Local API response captures may contain sensitive data
+tests/*-response.json

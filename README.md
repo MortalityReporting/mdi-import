@@ -137,6 +137,7 @@ dotnet test tests/MortalityReporting.ImportApi.Tests
 - Both incoming and outgoing requests require Basic authentication when credentials are configured
 - DCR submitter/contact data maps to a Practitioner and funeral-home data maps to an Organization.
 - Toxicology laboratory metadata maps to an Organization and general comments map to `DiagnosticReport.conclusion`.
+- XLSX residence, death, injury, and autopsy address labels map to FHIR Address/Location resources; autopsy status maps to the VRDR autopsy indicator profile.
 
 ## Delegation loop
 

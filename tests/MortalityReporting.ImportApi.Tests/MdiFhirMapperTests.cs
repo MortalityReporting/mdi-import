@@ -119,4 +119,26 @@ public sealed class MdiFhirMapperTests
         Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Organization");
         Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Practitioner" && entry!["resource"]!["id"]?.GetValue<string>()?.Contains("submitter") == true);
     }
+
+    [Fact]
+    public void MapsXlsxAddressLabelsAndAutopsyFields()
+    {
+        ImportRecord record = new();
+        record.Fields["BASEFHIRID"] = "case-address";
+        record.Fields["Decedent Name"] = "Han Solo";
+        record.Fields["Decedent Residence: Street"] = "5100 Peachtree Street";
+        record.Fields["Location of Death: Street"] = "5100 Peachtree Street";
+        record.Fields["Location of Death: City"] = "Atlanta";
+        record.Fields["Location of Injury: Street"] = "3487 Lilac Lane";
+        record.Fields["Autopsy Performed?"] = "Yes";
+        record.Fields["Autopsy Results Available?"] = "Yes";
+        record.Fields["Autopsy Performed Office Name"] = "HEAT Division";
+        record.Fields["Autopsy Performed Location: City"] = "Atlanta";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Location" && entry!["resource"]!["id"]?.GetValue<string>()?.Contains("death") == true);
+        Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Location" && entry!["resource"]!["id"]?.GetValue<string>()?.Contains("autopsy") == true);
+        Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["meta"]!["profile"]!.AsArray().Any(profile => profile!.GetValue<string>().Contains("vrdr-autopsy-performed-indicator", StringComparison.Ordinal)));
+        Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Patient" && entry!["resource"]!["address"] is not null);
+    }
 }
