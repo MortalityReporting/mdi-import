@@ -7,6 +7,7 @@ using GaTech.Chai.Vrcl;
 using GaTech.Chai.Vrdr;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
+using MortalityReporting.ImportApi.Configuration;
 using MortalityReporting.ImportApi.Models;
 
 namespace MortalityReporting.ImportApi.Services;
@@ -14,6 +15,12 @@ namespace MortalityReporting.ImportApi.Services;
 public sealed class MdiFhirMapper
 {
     private readonly object registryLock = new();
+    private readonly string fhirFullUrlBase;
+
+    public MdiFhirMapper(ImportApiOptions? options = null)
+    {
+        fhirFullUrlBase = (options?.FhirFullUrlBase ?? "https://mdi.local/fhir").TrimEnd('/');
+    }
 
     public JsonObject Map(ImportRecord record)
     {
@@ -35,17 +42,17 @@ public sealed class MdiFhirMapper
 
     private void RewriteResourceUris(JsonObject root)
     {
-        Dictionary<string, string> replacements = [];
+        Dictionary<string, (string Relative, string Absolute)> replacements = [];
         CollectResourceUris(root, replacements);
         ReplaceResourceUris(root, replacements);
     }
 
-    private void CollectResourceUris(JsonNode? node, Dictionary<string, string> replacements)
+    private void CollectResourceUris(JsonNode? node, Dictionary<string, (string Relative, string Absolute)> replacements)
     {
         if (node is JsonObject obj)
         {
             if (obj["resourceType"]?.GetValue<string>() is { } resourceType && obj["id"]?.GetValue<string>() is { } id)
-                replacements[$"urn:uuid:{id}"] = $"{resourceType}/{id}";
+                replacements[$"urn:uuid:{id}"] = ($"{resourceType}/{id}", $"{fhirFullUrlBase}/{resourceType}/{Uri.EscapeDataString(id)}");
             foreach (JsonNode? child in obj.Select(item => item.Value)) CollectResourceUris(child, replacements);
         }
         else if (node is JsonArray array)
@@ -54,15 +61,15 @@ public sealed class MdiFhirMapper
         }
     }
 
-    private static void ReplaceResourceUris(JsonNode? node, IReadOnlyDictionary<string, string> replacements)
+    private static void ReplaceResourceUris(JsonNode? node, IReadOnlyDictionary<string, (string Relative, string Absolute)> replacements)
     {
         if (node is JsonObject obj)
         {
             foreach (string key in obj.Select(item => item.Key).ToList())
             {
                 JsonNode? child = obj[key];
-                if (child is JsonValue value && value.TryGetValue<string>(out string? text) && text is not null && replacements.TryGetValue(text, out string? replacement))
-                    obj[key] = replacement;
+                if (child is JsonValue value && value.TryGetValue<string>(out string? text) && text is not null && replacements.TryGetValue(text, out (string Relative, string Absolute) replacement))
+                    obj[key] = key == "fullUrl" ? replacement.Absolute : replacement.Relative;
                 else ReplaceResourceUris(child, replacements);
             }
         }

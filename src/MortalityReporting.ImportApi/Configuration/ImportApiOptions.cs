@@ -8,6 +8,7 @@ public sealed class ImportApiOptions
     public string IncomingUsername { get; set; } = "";
     public string IncomingPassword { get; set; } = "";
     public string FhirEndpoint { get; set; } = "";
+    public string FhirFullUrlBase { get; set; } = "https://mdi.local/fhir";
     public string FhirUsername { get; set; } = "";
     public string FhirPassword { get; set; } = "";
     public long MaxFileSizeBytes { get; set; } = 50 * 1024 * 1024;
@@ -19,6 +20,7 @@ public sealed class ImportApiOptions
         IncomingUsername = EnvironmentValue("INCOMING_API_USERNAME") ?? IncomingUsername;
         IncomingPassword = EnvironmentValue("INCOMING_API_PASSWORD") ?? IncomingPassword;
         FhirEndpoint = EnvironmentValue("FHIR_API_ENDPOINT") ?? EnvironmentValue("FHIR_ENDPOINT") ?? FhirEndpoint;
+        FhirFullUrlBase = EnvironmentValue("FHIR_FULL_URL_BASE") ?? FhirFullUrlBase;
         FhirUsername = EnvironmentValue("FHIR_API_USERNAME") ?? FhirUsername;
         FhirPassword = EnvironmentValue("FHIR_API_PASSWORD") ?? FhirPassword;
         if (long.TryParse(Environment.GetEnvironmentVariable("MAX_FILE_SIZE_BYTES"), out long maxSize)) MaxFileSizeBytes = maxSize;
@@ -37,6 +39,8 @@ public sealed class ImportApiOptions
             throw new InvalidOperationException("ImportApi:IncomingPath must start with '/'.");
         if (string.IsNullOrWhiteSpace(FhirEndpoint) || !Uri.TryCreate(FhirEndpoint, UriKind.Absolute, out _))
             throw new InvalidOperationException("ImportApi:FhirEndpoint must be an absolute URL.");
+        if (string.IsNullOrWhiteSpace(FhirFullUrlBase) || !Uri.TryCreate(FhirFullUrlBase, UriKind.Absolute, out _))
+            throw new InvalidOperationException("ImportApi:FhirFullUrlBase must be an absolute URL.");
         if (MaxFileSizeBytes <= 0) throw new InvalidOperationException("ImportApi:MaxFileSizeBytes must be positive.");
         if (FhirTimeoutSeconds <= 0) throw new InvalidOperationException("ImportApi:FhirTimeoutSeconds must be positive.");
     }

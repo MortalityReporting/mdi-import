@@ -29,6 +29,7 @@ The API will start on the configured port (default: 5000 for HTTP, 5001 for HTTP
 | `INCOMING_API_USERNAME` | Username for Basic authentication on incoming requests |
 | `INCOMING_API_PASSWORD` | Password for Basic authentication on incoming requests |
 | `FHIR_API_ENDPOINT` | FHIR server endpoint URL for data submission |
+| `FHIR_FULL_URL_BASE` | Absolute base URI used for Bundle `fullUrl` values (default: `https://mdi.local/fhir`) |
 | `FHIR_API_USERNAME` | Username for Basic authentication on FHIR endpoint |
 | `FHIR_API_PASSWORD` | Password for Basic authentication on FHIR endpoint |
 | `FHIR_TIMEOUT_SECONDS` | Timeout for FHIR requests (default: 30) |
@@ -40,7 +41,7 @@ The API supports the following configurable options:
 
 - **Incoming Path**: Configurable via `INCOMING_API_PATH` environment variable
 - **FHIR Endpoint**: Configurable via `FHIR_API_ENDPOINT` environment variable
-- **Resource references**: Bundle `fullUrl` and resource references use relative values such as `Patient/patient-123`.
+- **Resource references**: Resource references use relative values such as `Patient/patient-123`; Bundle `fullUrl` values use the configured absolute `FHIR_FULL_URL_BASE`.
 - **Basic Authentication**: Required on both incoming requests and outgoing FHIR submissions
 - **File Upload Field**: Multipart field name is `file`
 

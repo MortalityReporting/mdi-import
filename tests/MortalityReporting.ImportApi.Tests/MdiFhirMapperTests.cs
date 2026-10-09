@@ -179,7 +179,9 @@ public sealed class MdiFhirMapperTests
 
         JsonObject bundle = new MdiFhirMapper().Map(record);
         string subjectReference = bundle["entry"]![0]! ["resource"]!["subject"]!["reference"]!.GetValue<string>();
+        string fullUrl = bundle["entry"]![0]!["fullUrl"]!.GetValue<string>();
         Assert.StartsWith("Patient/", subjectReference, StringComparison.Ordinal);
+        Assert.StartsWith("https://mdi.local/fhir/Composition/", fullUrl, StringComparison.Ordinal);
         foreach (string value in StringValues(bundle))
         {
             if (value.StartsWith("urn:uuid:", StringComparison.Ordinal))
