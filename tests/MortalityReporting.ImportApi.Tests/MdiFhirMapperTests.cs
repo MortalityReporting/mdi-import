@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using GaTech.Chai.Vrdr;
 using MortalityReporting.ImportApi.Models;
 using MortalityReporting.ImportApi.Services;
 using Xunit;
@@ -188,6 +189,139 @@ public sealed class MdiFhirMapperTests
                 Assert.True(Guid.TryParse(value[9..], out _), $"Invalid UUID URI: {value}");
         }
     }
+
+    [Fact]
+    public void PregnancyStatusNotApplicableMapsToNACoding()
+    {
+        ImportRecord record = new();
+        record.Fields["BASEFHIRID"] = "case-pregnancy-na";
+        record.Fields["Decedent Name"] = "Jane Doe";
+        record.Fields["FIRSTNAME"] = "Jane";
+        record.Fields["LASTNAME"] = "Doe";
+        record.Fields["PREGNANT"] = "Not Applicable";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        JsonObject? pregnancyObservation = FindPregnancyObservation(bundle);
+
+        Assert.NotNull(pregnancyObservation);
+        Assert.NotNull(pregnancyObservation!["valueCodeableConcept"]);
+        Assert.IsType<JsonObject>(pregnancyObservation["valueCodeableConcept"]);
+        JsonObject value = (JsonObject)pregnancyObservation["valueCodeableConcept"]!;
+        Assert.NotNull(value["coding"]);
+        JsonArray codingArray = (JsonArray)value["coding"]!;
+        Assert.Single(codingArray);
+        JsonObject coding = (JsonObject)codingArray[0]!;
+        Assert.Equal(CodeSystemDeathPregnancyStatus.NA.Coding[0].System, coding["system"]!.GetValue<string>());
+        Assert.Equal(CodeSystemDeathPregnancyStatus.NA.Coding[0].Code, coding["code"]!.GetValue<string>());
+        Assert.Equal(CodeSystemDeathPregnancyStatus.NA.Coding[0].Display, coding["display"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void PregnancyStatusPregnantAtTimeOfDeathMapsToVrdrCoding()
+    {
+        ImportRecord record = new();
+        record.Fields["BASEFHIRID"] = "case-pregnancy-pregnant";
+        record.Fields["Decedent Name"] = "Jane Doe";
+        record.Fields["FIRSTNAME"] = "Jane";
+        record.Fields["LASTNAME"] = "Doe";
+        record.Fields["PREGNANT"] = "Pregnant at time of death";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        JsonObject? pregnancyObservation = FindPregnancyObservation(bundle);
+
+        Assert.NotNull(pregnancyObservation);
+        Assert.NotNull(pregnancyObservation["valueCodeableConcept"]);
+        Assert.IsType<JsonObject>(pregnancyObservation["valueCodeableConcept"]);
+        JsonObject value = (JsonObject)pregnancyObservation["valueCodeableConcept"]!;
+        Assert.NotNull(value["coding"]);
+        JsonArray codingArray = (JsonArray)value["coding"]!;
+        Assert.Single(codingArray);
+        JsonObject coding = (JsonObject)codingArray[0]!;
+        Assert.Equal(CodeSystemDeathPregnancyStatus.PregnantAtTimeOfDeath.Coding[0].System, coding["system"]!.GetValue<string>());
+        Assert.Equal(CodeSystemDeathPregnancyStatus.PregnantAtTimeOfDeath.Coding[0].Code, coding["code"]!.GetValue<string>());
+        Assert.Equal(CodeSystemDeathPregnancyStatus.PregnantAtTimeOfDeath.Coding[0].Display, coding["display"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void PregnancyStatusUnrecognizedValueRemainsTextOnly()
+    {
+        ImportRecord record = new();
+        record.Fields["BASEFHIRID"] = "case-pregnancy-unknown";
+        record.Fields["Decedent Name"] = "Jane Doe";
+        record.Fields["FIRSTNAME"] = "Jane";
+        record.Fields["LASTNAME"] = "Doe";
+        record.Fields["PREGNANT"] = "Unknown pregnancy status";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        JsonObject? pregnancyObservation = FindPregnancyObservation(bundle);
+
+        Assert.NotNull(pregnancyObservation);
+        Assert.NotNull(pregnancyObservation["valueCodeableConcept"]);
+        Assert.IsType<JsonObject>(pregnancyObservation["valueCodeableConcept"]);
+        JsonObject value = (JsonObject)pregnancyObservation["valueCodeableConcept"]!;
+        Assert.Null(value["coding"]);
+        Assert.Equal("Unknown pregnancy status", value["text"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void MissingPregnancyStatusOmitsPregnancyObservation()
+    {
+        ImportRecord record = new();
+        record.Fields["BASEFHIRID"] = "case-pregnancy-missing";
+        record.Fields["Decedent Name"] = "Jane Doe";
+        record.Fields["FIRSTNAME"] = "Jane";
+        record.Fields["LASTNAME"] = "Doe";
+        // PREGNANT field is not set
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        JsonObject? pregnancyObservation = FindPregnancyObservation(bundle);
+
+        Assert.Null(pregnancyObservation);
+    }
+
+    [Fact]
+    public void CodedConceptsOmitEmptyText()
+    {
+        ImportRecord record = new();
+        record.Fields["BASEFHIRID"] = "case-empty-concept-text";
+        record.Fields["MRNNUMBER"] = "MRN-1";
+        record.Fields["AUTOPSYPERFORMED"] = "Yes";
+        record.Fields["AUTOPSYRESULTSAVAILABLE"] = "No";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        JsonObject patient = FindResource(bundle, "Patient");
+        JsonObject patientIdentifierType = patient["identifier"]![0]!["type"]!.AsObject();
+        Assert.Null(patientIdentifierType["text"]);
+
+        JsonObject autopsy = FindResource(bundle, "Observation", "-autopsy");
+        Assert.Null(autopsy["code"]!["text"]);
+        Assert.Null(autopsy["component"]![0]!["code"]!["text"]);
+    }
+
+    private static JsonObject? FindPregnancyObservation(JsonObject bundle)
+    {
+        JsonArray entries = bundle["entry"]!.AsArray();
+        foreach (JsonNode? entry in entries)
+        {
+            JsonObject? resource = entry!["resource"]?.AsObject();
+            if (resource != null && resource["resourceType"]?.GetValue<string>() == "Observation")
+            {
+                // Look for observations with IDs ending in "-pregnancy" (pattern: observation-{id}-pregnancy)
+                string? resourceId = resource["id"]?.GetValue<string>();
+                if (resourceId != null && resourceId.EndsWith("-pregnancy", StringComparison.OrdinalIgnoreCase))
+                {
+                    return resource;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static JsonObject FindResource(JsonObject bundle, string resourceType, string idSuffix = "") =>
+        bundle["entry"]!.AsArray()
+            .Select(entry => entry!["resource"]!.AsObject())
+            .First(resource => resource["resourceType"]?.GetValue<string>() == resourceType &&
+                              resource["id"]?.GetValue<string>()?.EndsWith(idSuffix, StringComparison.OrdinalIgnoreCase) == true);
 
     private static IEnumerable<string> StringValues(JsonNode? node)
     {

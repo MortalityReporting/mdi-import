@@ -279,13 +279,13 @@ public sealed class MdiFhirMapper
             patient.Identifier.Add(new Identifier
             {
                 Use = Identifier.IdentifierUse.Usual,
-                Type = new CodeableConcept("http://terminology.hl7.org/CodeSystem/v2-0203", "SB", "Social Beneficiary Identifier", ""),
+                Type = CodedConcept("http://terminology.hl7.org/CodeSystem/v2-0203", "SB", "Social Beneficiary Identifier"),
                 System = "http://hl7.org/fhir/sid/us-ssn",
                 Value = ssn
             });
         }
         if (record.Get("MRNNUMBER") is { } mrn)
-            patient.Identifier.Add(new Identifier("urn:mdi:mrn", mrn) { Use = Identifier.IdentifierUse.Usual, Type = new CodeableConcept("http://terminology.hl7.org/CodeSystem/v2-0203", "MR", "Medical record number", "") });
+            patient.Identifier.Add(new Identifier("urn:mdi:mrn", mrn) { Use = Identifier.IdentifierUse.Usual, Type = CodedConcept("http://terminology.hl7.org/CodeSystem/v2-0203", "MR", "Medical record number") });
         if (patient.Identifier.Count == 0)
         {
             Identifier absentIdentifier = new();
@@ -293,8 +293,8 @@ public sealed class MdiFhirMapper
             patient.Identifier.Add(absentIdentifier);
         }
         if (BuildAddress(record, "RES") is { } address) patient.Address = [address];
-        if (record.Get("LANGUAGE") is { } language) patient.Communication = [new Patient.CommunicationComponent { Language = new CodeableConcept { Text = language } }];
-        if (record.Get("MARITAL", "Decedent Marital status") is { } marital) patient.MaritalStatus = new CodeableConcept { Text = marital };
+        if (record.Get("LANGUAGE") is { } language) patient.Communication = [new Patient.CommunicationComponent { Language = new CodeableConcept { Text = NullIfWhiteSpace(language) } }];
+        if (record.Get("MARITAL", "Decedent Marital status") is { } marital) patient.MaritalStatus = new CodeableConcept { Text = NullIfWhiteSpace(marital) };
         AddRaceAndEthnicity(patient, record);
         return patient;
     }
@@ -441,7 +441,7 @@ public sealed class MdiFhirMapper
     private static Observation? CreateDisposition(ImportRecord record, Patient patient, string id)
     {
         if (record.Get("DISPMETHOD") is not { } value) return null;
-        Observation observation = VrdrDecedentDispositionMethod.Create(patient); observation.Id = $"observation-{id}-disposition"; observation.Value = new CodeableConcept { Text = value }; return observation;
+        Observation observation = VrdrDecedentDispositionMethod.Create(patient); observation.Id = $"observation-{id}-disposition"; observation.Value = new CodeableConcept { Text = NullIfWhiteSpace(value) }; return observation;
     }
 
     private static Procedure? CreateCertification(ImportRecord record, Patient patient, Practitioner practitioner, string id)
@@ -455,7 +455,27 @@ public sealed class MdiFhirMapper
     private static Observation? CreatePregnancy(ImportRecord record, Patient patient, string id)
     {
         if (record.Get("PREGNANT", "Pregnancy status") is not { } value) return null;
-        Observation observation = VrdrDecedentPregnancyStatus.Create(patient); observation.Id = $"observation-{id}-pregnancy"; observation.Value = new CodeableConcept { Text = value }; return observation;
+        CodeableConcept[] knownStatuses =
+        [
+            CodeSystemDeathPregnancyStatus.NotPregnantPastYear,
+            CodeSystemDeathPregnancyStatus.PregnantAtTimeOfDeath,
+            CodeSystemDeathPregnancyStatus.NotpregnantButPregnant42DaysOfDeath,
+            CodeSystemDeathPregnancyStatus.NotPregnantButPregnant43DaysTo1YearBeforeDeath,
+            CodeSystemDeathPregnancyStatus.NotReportedOnCertificate,
+            CodeSystemDeathPregnancyStatus.UnknownIfPregnantPastYear,
+            CodeSystemDeathPregnancyStatus.NA
+        ];
+        string input = value.Trim();
+        CodeableConcept? matchedStatus = knownStatuses.FirstOrDefault(status =>
+            status.Coding.Any(coding => string.Equals(coding.Display?.Trim(), input, StringComparison.OrdinalIgnoreCase)) ||
+            string.Equals(status.Text?.Trim(), input, StringComparison.OrdinalIgnoreCase));
+
+        Observation observation = VrdrDecedentPregnancyStatus.Create(patient);
+        observation.Id = $"observation-{id}-pregnancy";
+        observation.Value = matchedStatus is null
+            ? new CodeableConcept { Text = NullIfWhiteSpace(value) }
+            : (CodeableConcept)matchedStatus.DeepCopy();
+        return observation;
     }
 
     private static Observation? CreateTobacco(ImportRecord record, Patient patient, string id)
@@ -482,7 +502,7 @@ public sealed class MdiFhirMapper
         {
             Id = $"observation-{id}-autopsy",
             Status = ObservationStatus.Final,
-            Code = new CodeableConcept("http://loinc.org", "85699-7", "Autopsy was performed", ""),
+            Code = CodedConcept("http://loinc.org", "85699-7", "Autopsy was performed"),
             Subject = patient.AsReference(),
             Performer = [practitioner.AsReference()],
             Value = YesNoUnknown(performed)
@@ -492,7 +512,7 @@ public sealed class MdiFhirMapper
         {
             observation.Component.Add(new Observation.ComponentComponent
             {
-                Code = new CodeableConcept("http://loinc.org", "69436-4", "Autopsy results available", ""),
+                Code = CodedConcept("http://loinc.org", "69436-4", "Autopsy results available"),
                 Value = YesNoUnknown(available)
             });
         }
@@ -596,7 +616,7 @@ public sealed class MdiFhirMapper
     private static CodeableConcept DcrReason(string? value)
     {
         string reason = value ?? "DC_MED_DATA_Q_REQ";
-        return new CodeableConcept("http://hl7.org/fhir/us/mdi/CodeSystem/cs-death-cert-review-example", reason, reason, "");
+        return CodedConcept("http://hl7.org/fhir/us/mdi/CodeSystem/cs-death-cert-review-example", reason, reason);
     }
 
     private static string SafeId(string value)
@@ -604,4 +624,12 @@ public sealed class MdiFhirMapper
         string id = new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).Take(48).ToArray());
         return id.Length > 0 ? id : Guid.NewGuid().ToString("N");
     }
+
+    private static string? NullIfWhiteSpace(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+
+    private static CodeableConcept CodedConcept(string codingSystem, string code, string display, string? text = null) => new()
+    {
+        Coding = [new Coding(codingSystem, code, display)],
+        Text = NullIfWhiteSpace(text)
+    };
 }
