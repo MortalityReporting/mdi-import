@@ -76,7 +76,19 @@ public sealed class MdiFhirMapperTests
         Assert.Equal("message", bundle["type"]?.GetValue<string>());
         Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "DiagnosticReport");
         Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Observation");
-        Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Organization");
+
+        // Assert Toxicology Lab Organization constraints
+        JsonObject? organizationEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Organization")?.AsObject();
+        Assert.NotNull(organizationEntry);
+        JsonObject? organization = organizationEntry!["resource"]!.AsObject();
+        // Assert the generated Organization has a nonblank name
+        Assert.NotNull(organization!["name"]?.GetValue<string>());
+        Assert.NotEmpty(organization!["name"]!.GetValue<string>());
+        // Assert address use is work
+        Assert.NotNull(organization!["address"]?.AsArray()[0]!["use"]);
+        Assert.Equal("work", organization!["address"]!.AsArray()[0]!["use"]?.GetValue<string>());
+
         Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["conclusion"]?.GetValue<string>() == "Interpretive note");
     }
 
@@ -145,8 +157,13 @@ public sealed class MdiFhirMapperTests
         Assert.Contains(bundle["meta"]!["profile"]!.AsArray(), value => value!.GetValue<string>().EndsWith("Bundle-message-death-certificate-review", StringComparison.Ordinal));
         Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "MessageHeader");
         Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Bundle");
-        Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Organization");
-        Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Practitioner" && entry!["resource"]!["id"]?.GetValue<string>()?.Contains("submitter") == true);
+
+        // Organization and Practitioner are now inside the nested document bundle, not in the outer bundle
+        JsonObject? documentBundle = FindResourceInBundle(bundle, "Bundle");
+        Assert.NotNull(documentBundle);
+        JsonArray documentEntries = documentBundle!["entry"]!.AsArray();
+        Assert.Contains(documentEntries, entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Organization");
+        Assert.Contains(documentEntries, entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Practitioner" && entry!["resource"]!["id"]?.GetValue<string>()?.Contains("submitter") == true);
     }
 
     [Fact]
@@ -188,6 +205,200 @@ public sealed class MdiFhirMapperTests
             if (value.StartsWith("urn:uuid:", StringComparison.Ordinal))
                 Assert.True(Guid.TryParse(value[9..], out _), $"Invalid UUID URI: {value}");
         }
+    }
+
+    [Fact]
+    public void MapsOnlyNewCremationFieldsToCremationClearanceInfo()
+    {
+        ImportRecord record = new(ImportTemplateKind.Dcr);
+        record.Fields["BASEFHIRID"] = "dcr-only-cremation";
+        record.Fields["Funeral Home: Name"] = "New Funeral Home";
+        record.Fields["Funeral Home: Phone"] = "555-0100";
+        record.Fields["Funeral Home: Fax"] = "555-0101";
+        record.Fields["Funeral Home: City"] = "Springfield";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        JsonObject? documentBundle = FindResourceInBundle(bundle, "Bundle");
+        Assert.NotNull(documentBundle);
+
+        JsonObject composition = FindResourceInBundle(documentBundle!, "Composition")!;
+        Assert.NotNull(composition);
+
+        JsonArray? sections = composition["section"]?.AsArray();
+        Assert.NotNull(sections);
+        Assert.NotEmpty(sections);
+
+        List<string> sectionCodes = sections!.Select(section =>
+                section!["code"]?["coding"]?.AsArray()[0]?["code"]?.GetValue<string>())
+            .Where(code => code is not null)
+            .Cast<string>()
+            .ToList();
+
+        Assert.Contains("cremation-clearance-info", sectionCodes);
+        Assert.DoesNotContain("DecedentDisposition", sectionCodes);
+
+        JsonObject? cremationSection = sections!.FirstOrDefault(section => section!["code"]?["coding"]?.AsArray()[0]?["code"]?.GetValue<string>() == "cremation-clearance-info")?.AsObject();
+        Assert.NotNull(cremationSection);
+        Assert.NotNull(cremationSection!["entry"]);
+        JsonArray? cremationEntries = cremationSection!["entry"]!.AsArray();
+        Assert.NotEmpty(cremationEntries);
+
+        JsonObject? organizationEntry = documentBundle!["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Organization")?.AsObject();
+        Assert.NotNull(organizationEntry);
+        JsonObject? organization = organizationEntry!["resource"]!.AsObject();
+        Assert.Equal("New Funeral Home", organization!["name"]?.GetValue<string>());
+
+        JsonArray? telecom = organization!["telecom"]?.AsArray();
+        Assert.NotNull(telecom);
+
+        JsonObject? phonePoint = telecom!.FirstOrDefault(point => point!["system"]?.GetValue<string>() == "phone")?.AsObject();
+        Assert.NotNull(phonePoint);
+        Assert.Equal("555-0100", phonePoint!["value"]?.GetValue<string>());
+        // Assert phone use is work
+        Assert.Equal("work", phonePoint!["use"]?.GetValue<string>());
+
+        JsonObject? faxPoint = telecom!.FirstOrDefault(point => point!["system"]?.GetValue<string>() == "fax")?.AsObject();
+        Assert.NotNull(faxPoint);
+        Assert.Equal("555-0101", faxPoint!["value"]?.GetValue<string>());
+        // Assert fax use is work
+        Assert.Equal("work", faxPoint!["use"]?.GetValue<string>());
+
+        // Assert Organization address use is work
+        Assert.NotNull(organization!["address"]?.AsArray()[0]!["use"]);
+        Assert.Equal("work", organization!["address"]!.AsArray()[0]!["use"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public void MapsLegacyFuneralHomeFieldsToDecedentDisposition()
+    {
+        ImportRecord record = new(ImportTemplateKind.Dcr);
+        record.Fields["BASEFHIRID"] = "dcr-legacy-disposition";
+        record.Fields["Funeral Home Name"] = "Legacy Funeral Home";
+        record.Fields["Funeral Home Address: City"] = "Shelbyville";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        JsonObject? documentBundle = FindResourceInBundle(bundle, "Bundle");
+        Assert.NotNull(documentBundle);
+
+        JsonObject composition = FindResourceInBundle(documentBundle!, "Composition")!;
+        Assert.NotNull(composition);
+
+        JsonArray? sections = composition["section"]?.AsArray();
+        Assert.NotNull(sections);
+        Assert.NotEmpty(sections);
+
+        List<string> sectionCodes = sections!.Select(section =>
+                section!["code"]?["coding"]?.AsArray()[0]?["code"]?.GetValue<string>())
+            .Where(code => code is not null)
+            .Cast<string>()
+            .ToList();
+
+        Assert.Contains("DecedentDisposition", sectionCodes);
+        Assert.DoesNotContain("cremation-clearance-info", sectionCodes);
+
+        JsonObject? dispositionSection = sections!.FirstOrDefault(section => section!["code"]?["coding"]?.AsArray()[0]?["code"]?.GetValue<string>() == "DecedentDisposition")?.AsObject();
+        Assert.NotNull(dispositionSection);
+        Assert.NotNull(dispositionSection!["entry"]);
+        JsonArray? dispositionEntries = dispositionSection!["entry"]!.AsArray();
+        Assert.NotEmpty(dispositionEntries);
+
+        JsonObject? organizationEntry = documentBundle!["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Organization")?.AsObject();
+        Assert.NotNull(organizationEntry);
+        JsonObject? organization = organizationEntry!["resource"]!.AsObject();
+        Assert.Equal("Legacy Funeral Home", organization!["name"]?.GetValue<string>());
+
+        // Assert the Organization has the correct resourceType and meta.profile
+        Assert.Equal("Organization", organization!["resourceType"]?.GetValue<string>());
+        JsonArray? metaProfiles = organization!["meta"]!["profile"]?.AsArray();
+        Assert.NotNull(metaProfiles);
+        Assert.Contains(metaProfiles, profile => profile!.GetValue<string>().EndsWith("vrdr-funeral-home", StringComparison.Ordinal));
+
+        // Assert Organization address use is work and telecom uses are work
+        Assert.NotNull(organization!["address"]?.AsArray()[0]!["use"]);
+        Assert.Equal("work", organization!["address"]!.AsArray()[0]!["use"]?.GetValue<string>());
+
+        // Assert telecom uses are work if present
+        JsonArray? telecom = organization!["telecom"]?.AsArray();
+        if (telecom is not null)
+        {
+            foreach (JsonNode? point in telecom)
+            {
+                JsonObject telecomPoint = point!.AsObject();
+                Assert.Equal("work", telecomPoint["use"]?.GetValue<string>());
+            }
+        }
+    }
+
+    [Fact]
+    public void MapsDcrRecordWithNoBundleDuplication()
+    {
+        ImportRecord record = new(ImportTemplateKind.Dcr);
+        record.Fields["BASEFHIRID"] = "dcr-no-duplication";
+        record.Fields["FIRSTNAME"] = "Jane";
+        record.Fields["LASTNAME"] = "Doe";
+        record.Fields["GENDER"] = "Female";
+        record.Fields["CAUSEA"] = "Fentanyl toxicity";
+        record.Fields["CDEATHDATE"] = "01/08/2022";
+        record.Fields["CERTIFIER_NAME"] = "Dr Smith";
+        record.Fields["Message Reason"] = "DC_MED_DATA_Q_REQ";
+        record.Fields["Submittor Name"] = "Alex Submitter";
+        record.Fields["Submittor Email"] = "alex@example.org";
+        record.Fields["Funeral Home Name"] = "Example Funeral Home";
+        record.Fields["Funeral Home Address: City"] = "Atlanta";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+
+        // Assert the outer bundle is a message type
+        Assert.Equal("message", bundle["type"]?.GetValue<string>());
+
+        // Assert the outer message Bundle contains exactly two entries: MessageHeader and BundleDocumentMdiDcr
+        JsonArray outerEntries = bundle["entry"]!.AsArray();
+        Assert.Equal(2, outerEntries.Count);
+
+        // Find the MessageHeader and Bundle entries
+        JsonObject? messageHeaderEntry = outerEntries.FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "MessageHeader")?.AsObject();
+        JsonObject? bundleEntry = outerEntries.FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Bundle")?.AsObject();
+
+        Assert.NotNull(messageHeaderEntry);
+        Assert.NotNull(bundleEntry);
+
+        // Assert no outer entry resource is Patient, Practitioner, Organization, Observation, Location, or Procedure
+        List<string> forbiddenResourceTypes = new List<string> { "Patient", "Practitioner", "Organization", "Observation", "Location", "Procedure" };
+        foreach (JsonNode? entry in outerEntries)
+        {
+            JsonObject resource = entry!["resource"]!.AsObject();
+            string resourceType = resource["resourceType"]?.GetValue<string>()!;
+            Assert.DoesNotContain(resourceType, forbiddenResourceTypes);
+        }
+
+        // Assert the nested document Bundle still contains the Composition and mapped Patient/Practitioner/resources
+        JsonObject documentBundle = bundleEntry!["resource"]!.AsObject();
+        JsonArray documentEntries = documentBundle["entry"]!.AsArray();
+
+        // Should contain Composition
+        Assert.Contains(documentEntries, entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Composition");
+
+        // Should contain Patient
+        Assert.Contains(documentEntries, entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Patient");
+
+        // Should contain Practitioner (certifier)
+        Assert.Contains(documentEntries, entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Practitioner");
+
+        // Assert the MessageHeader focus reference equals Bundle/{document.id}
+        string documentId = documentBundle["id"]?.GetValue<string>()!;
+        JsonObject messageHeader = messageHeaderEntry!["resource"]!.AsObject();
+        string focusReference = messageHeader["focus"]![0]!["reference"]?.GetValue<string>()!;
+        Assert.Equal($"Bundle/{documentId}", focusReference);
+    }
+    private static JsonObject? FindResourceInBundle(JsonObject bundle, string resourceType)
+    {
+        JsonArray? entries = bundle["entry"]?.AsArray();
+        if (entries is null) return null;
+        return entries
+            .Select(entry => entry!["resource"]?.AsObject())
+            .FirstOrDefault(resource => resource?["resourceType"]?.GetValue<string>() == resourceType);
     }
 
     [Fact]

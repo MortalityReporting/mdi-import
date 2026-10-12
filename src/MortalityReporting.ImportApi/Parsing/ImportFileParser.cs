@@ -49,7 +49,7 @@ public sealed class ImportFileParser
             }
             if (record.HasData) records.Add(record);
         }
-        return records;
+        return FinalizeCaseIdentities(records);
     }
 
     private static IReadOnlyList<ImportRecord> ParseXlsx(Stream input)
@@ -96,7 +96,7 @@ public sealed class ImportFileParser
             List<ImportRecord> records = foundSchema
                 ? schemaRecords.Where(record => record.HasCaseSpecificData).ToList()
                 : schemaRecords.Where(record => record.HasData).ToList();
-            return records;
+            return FinalizeCaseIdentities(records);
         }
         catch (ImportParseException) { throw; }
         catch (Exception exception) { throw new ImportParseException($"Unable to read XLSX workbook: {exception.Message}"); }
@@ -104,7 +104,9 @@ public sealed class ImportFileParser
 
     private static List<ImportRecord> ParseSchema(List<List<string?>> rows, List<(int Index, string Name)> caseColumns, ImportTemplateKind kind)
     {
-        List<ImportRecord> records = caseColumns.Select(_ => new ImportRecord(kind)).ToList();
+        List<ImportRecord> records = caseColumns
+            .Select(column => new ImportRecord(kind) { SourceKey = column.Name })
+            .ToList();
         foreach (List<string?> row in rows.Skip(1))
         {
             string? section = Get(row, 0);
@@ -209,13 +211,61 @@ public sealed class ImportFileParser
 
     private static void MergeSchemaRecords(List<ImportRecord> destination, List<ImportRecord> source)
     {
-        while (destination.Count < source.Count) destination.Add(new ImportRecord(source.FirstOrDefault()?.Kind ?? ImportTemplateKind.MdiAndEdrs));
         for (int index = 0; index < source.Count; index++)
         {
-            destination[index].HasCaseSpecificData |= source[index].HasCaseSpecificData;
-            foreach (string field in source[index].ExpectedFields) destination[index].ExpectedFields.Add(field);
-            foreach ((string key, string? value) in source[index].Fields) destination[index].Fields[key] = value;
-            foreach ((string key, List<Dictionary<string, string?>> value) in source[index].Tables) destination[index].Tables[key] = value;
+            ImportRecord sourceRecord = source[index];
+            int destinationIndex = sourceRecord.SourceKey is null
+                ? index < destination.Count ? index : -1
+                : destination.FindIndex(record => string.Equals(record.SourceKey, sourceRecord.SourceKey, StringComparison.OrdinalIgnoreCase));
+            if (destinationIndex < 0)
+            {
+                destination.Add(sourceRecord);
+                continue;
+            }
+            ImportRecord destinationRecord = destination[destinationIndex];
+            destinationRecord.HasCaseSpecificData |= sourceRecord.HasCaseSpecificData;
+            foreach (string field in sourceRecord.ExpectedFields) destinationRecord.ExpectedFields.Add(field);
+            foreach ((string key, string? value) in sourceRecord.Fields) destinationRecord.Fields[key] = value;
+            foreach ((string key, List<Dictionary<string, string?>> value) in sourceRecord.Tables) destinationRecord.Tables[key] = value;
+        }
+    }
+
+    private static IReadOnlyList<ImportRecord> FinalizeCaseIdentities(List<ImportRecord> records)
+    {
+        Dictionary<string, List<ImportRecord>> keyedGroups = records
+            .GroupBy(record => ImportRecord.Normalize(record.Get("BASEFHIRID", "File Id", "MDICASEID", "EDRSCASEID") ?? ""), StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Key.Length > 0)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (List<ImportRecord> group in keyedGroups.Values.Where(group => group.Count > 1))
+        {
+            AssignDiscriminators(group);
+        }
+
+        foreach (List<ImportRecord> group in records
+            .Where(record => string.IsNullOrWhiteSpace(record.Get("BASEFHIRID", "File Id", "MDICASEID", "EDRSCASEID")))
+            .GroupBy(record => record.CanonicalFingerprint(), StringComparer.Ordinal)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.ToList()))
+        {
+            AssignDiscriminators(group);
+        }
+        return records;
+    }
+
+    private static void AssignDiscriminators(List<ImportRecord> records)
+    {
+        foreach (IGrouping<string, ImportRecord> fingerprintGroup in records.GroupBy(record => record.CanonicalFingerprint(), StringComparer.Ordinal))
+        {
+            List<ImportRecord> matching = fingerprintGroup.ToList();
+            if (matching.Count == 1)
+            {
+                matching[0].IdentityDiscriminator = fingerprintGroup.Key;
+                continue;
+            }
+            if (matching.Any(record => string.IsNullOrWhiteSpace(record.SourceKey)))
+                throw new ImportParseException("Multiple identical cases share the same case identifier. Provide a distinct case identifier for each case.");
+            foreach (ImportRecord record in matching) record.IdentityDiscriminator = record.SourceKey;
         }
     }
 

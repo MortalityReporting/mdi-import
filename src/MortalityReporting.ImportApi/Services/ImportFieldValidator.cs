@@ -7,7 +7,7 @@ public static class ImportFieldValidator
 {
     private static readonly HashSet<string> DateFields = new(StringComparer.OrdinalIgnoreCase)
     {
-        "birthdate", "decedentdob", "reportdate", "founddate", "cdeathdate", "eventdate", "prndate", "examdate", "cinjdate", "cinjdateearly", "cinjdatelate", "lkadate", "athospdate", "surgdate", "dateofinjury", "decedentdateofdeath", "datepronounceddead"
+        "birthdate", "decedentdob", "reportdate", "founddate", "cdeathdate", "eventdate", "prndate", "examdate", "cinjdate", "cinjdateearly", "cinjdatelate", "lkadate", "athospdate", "surgdate", "dateofinjury", "decedentdateofdeath", "datepronounceddead", "certifieddate"
     };
 
     private static readonly HashSet<string> TimeFields = new(StringComparer.OrdinalIgnoreCase)

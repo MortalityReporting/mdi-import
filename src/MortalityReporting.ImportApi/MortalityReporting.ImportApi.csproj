@@ -8,6 +8,6 @@
   <ItemGroup>
     <PackageReference Include="ClosedXML" Version="0.104.2" />
     <PackageReference Include="CsvHelper" Version="33.0.1" />
-    <PackageReference Include="fhir-ig-mdi-dotnet" Version="2.1.1" />
+    <PackageReference Include="fhir-ig-mdi-dotnet" Version="2.1.2" />
   </ItemGroup>
 </Project>

@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using GaTech.Chai.Mdi;
 using GaTech.Chai.Share;
@@ -14,7 +16,7 @@ namespace MortalityReporting.ImportApi.Services;
 
 public sealed class MdiFhirMapper
 {
-    private readonly object registryLock = new();
+    private static readonly object registryLock = new();
     private readonly string fhirFullUrlBase;
 
     public MdiFhirMapper(ImportApiOptions? options = null)
@@ -81,8 +83,8 @@ public sealed class MdiFhirMapper
 
     private static Bundle MapMdi(ImportRecord record)
     {
-        string caseKey = record.Get("BASEFHIRID", "File Id", "MDICASEID", "EDRSCASEID") ?? $"case-{Guid.NewGuid():N}";
-        string id = SafeId(caseKey);
+        string caseKey = CaseKey(record, "case");
+        string id = CaseToken(record, caseKey);
         Patient patient = CreatePatient(record, $"patient-{id}");
         Practitioner practitioner = CreatePractitioner(record, $"practitioner-{id}");
         List<Observation> causes = [];
@@ -147,15 +149,16 @@ public sealed class MdiFhirMapper
         List<Resource> examAutopsy = Resources(autopsy, autopsyLocation);
         composition.CompositionMdiAndEdrs().ExamAutopsy = SectionValue(examAutopsy);
 
-        Bundle bundle = BundleDocumentMdiAndEdrs.Create(new Identifier("urn:ietf:rfc:3986", $"urn:uuid:{Guid.NewGuid()}"), composition);
-        bundle.Id = $"bundle-{id}";
+        Bundle bundle = BundleDocumentMdiAndEdrs.Create(new Identifier("urn:ietf:rfc:3986", $"urn:uuid:{DeterministicUuid($"mdi|{id}")}"), composition);
+        bundle.Id = $"bundle-mdi-{id}";
         bundle.TimestampElement = Instant.Now();
         return bundle;
     }
 
     private static Bundle MapToxicology(ImportRecord record)
     {
-        string id = SafeId(record.Get("File Id", "MDI Case Number") ?? $"tox-{Guid.NewGuid():N}");
+        string caseKey = CaseKey(record, "tox");
+        string id = CaseToken(record, caseKey);
         Patient patient = CreatePatient(record, $"patient-{id}");
         Practitioner performer = VrdrCertifier.Create();
         performer.Id = $"practitioner-{id}";
@@ -176,19 +179,23 @@ public sealed class MdiFhirMapper
         if (notes.Length > 0) report.Conclusion = string.Join(Environment.NewLine, notes);
 
         Dictionary<string, Specimen> specimens = new(StringComparer.OrdinalIgnoreCase);
-        foreach (Dictionary<string, string?> row in record.Tables.GetValueOrDefault("Specimens") ?? [])
+        List<Dictionary<string, string?>> specimenRows = record.Tables.GetValueOrDefault("Specimens") ?? [];
+        for (int rowIndex = 0; rowIndex < specimenRows.Count; rowIndex++)
         {
+            Dictionary<string, string?> row = specimenRows[rowIndex];
             string name = row.GetValueOrDefault("Name") ?? "Specimen";
             Specimen specimen = SpecimenToxicologyLab.Create(name, patient);
-            specimen.Id = $"specimen-{id}-{SafeId(row.GetValueOrDefault("Identifier") ?? name)}";
+            specimen.Id = $"specimen-{id}-{StableToken($"specimen|{rowIndex}|{CanonicalRow(row)}", 12)}";
             report.DiagnosticReportToxicologyLabResultToMdi().AddSpecimen(specimen);
             specimens[name.Trim()] = specimen;
         }
-        foreach (Dictionary<string, string?> row in record.Tables.GetValueOrDefault("Results") ?? [])
+        List<Dictionary<string, string?>> resultRows = record.Tables.GetValueOrDefault("Results") ?? [];
+        for (int rowIndex = 0; rowIndex < resultRows.Count; rowIndex++)
         {
+            Dictionary<string, string?> row = resultRows[rowIndex];
             string analyte = row.GetValueOrDefault("Analyte/Analysis") ?? "Toxicology result";
             Observation result = ObservationToxicologyLabResult.Create(ObservationStatus.Final, analyte, patient);
-            result.Id = $"observation-{id}-{SafeId(analyte)}";
+            result.Id = $"observation-{id}-{StableToken($"result|{rowIndex}|{CanonicalRow(row)}", 12)}";
             result.ObservationToxicologyLabResult().ValueText = row.GetValueOrDefault("Value") ?? "";
             if (row.GetValueOrDefault("Specimen") is { } specimenName && specimens.TryGetValue(specimenName.Trim(), out Specimen? specimen))
                 result.ObservationToxicologyLabResult().Specimen = specimen;
@@ -197,16 +204,16 @@ public sealed class MdiFhirMapper
 
         MessageHeader header = MessageHeaderToxicologyToMdi.Create("urn:mdi:import", report);
         header.Id = $"message-header-{id}";
-        Bundle bundle = BundleMessageToxicologyToMdi.Create(new Identifier("urn:mdi:case", id), header);
-        bundle.Id = $"bundle-{id}";
+        Bundle bundle = BundleMessageToxicologyToMdi.Create(new Identifier("urn:mdi:case", caseKey), header);
+        bundle.Id = $"bundle-tox-{id}";
         bundle.TimestampElement = Instant.Now();
         return bundle;
     }
 
     private static Bundle MapDcr(ImportRecord record)
     {
-        string caseKey = record.Get("BASEFHIRID", "File Id", "MDICASEID", "EDRSCASEID") ?? $"dcr-{Guid.NewGuid():N}";
-        string id = SafeId(caseKey);
+        string caseKey = CaseKey(record, "dcr");
+        string id = CaseToken(record, caseKey);
         Patient patient = CreatePatient(record, $"patient-{id}");
         Practitioner practitioner = CreatePractitioner(record, $"practitioner-{id}");
         Practitioner? submitter = CreateSubmitter(record, $"practitioner-{id}-submitter");
@@ -234,17 +241,33 @@ public sealed class MdiFhirMapper
         if (record.Get("EDRSCASEID", "Tracking Number: EDRS File Number") is { } edrsCase)
             composition.CompositionMdiDcr().EdrsFileNumber = ("urn:mdi:edrs", edrsCase);
 
-        composition.CompositionMdiDcr().DecedentDemographics = (Resources(patient), null);
+        var dcrComposition = composition.CompositionMdiDcr();
+        List<Resource> demographicResources = HasImportedDemographicData(record) ? Resources(patient) : [];
+        if (demographicResources.Count > 0) dcrComposition.DecedentDemographics = (demographicResources, null);
         List<Resource?> investigationResources = [deathDate, manner, injury, deathLocation, injuryLocation, autopsy, autopsyLocation];
         investigationResources.AddRange(causes);
-        composition.CompositionMdiDcr().DeathInvestigation = (Resources(investigationResources.ToArray()), null);
-        composition.CompositionMdiDcr().DeathCertification = (Resources(practitioner, submitter, certification), null);
-        composition.CompositionMdiDcr().DecedentDisposition = (Resources(disposition, funeralHome), null);
-        composition.CompositionMdiDcr().DeathCertificateDataReview = (null, ListEmptyReason.Unavailable);
-        composition.CompositionMdiDcr().CremationClearanceInfo = (null, ListEmptyReason.Unavailable);
+        List<Resource> deathInvestigationResources = Resources(investigationResources.ToArray());
+        if (deathInvestigationResources.Count > 0) dcrComposition.DeathInvestigation = (deathInvestigationResources, null);
+        List<Resource> deathCertificationResources = [];
+        if (HasImportedCertifierData(record)) deathCertificationResources.Add(practitioner);
+        if (submitter is not null) deathCertificationResources.Add(submitter);
+        if (certification is not null) deathCertificationResources.Add(certification);
+        if (deathCertificationResources.Count > 0) dcrComposition.DeathCertification = (deathCertificationResources, null);
+        bool hasLegacyFuneralHomeData = HasLegacyFuneralHomeData(record);
+        bool hasNewCremationData = HasNewCremationData(record);
+        List<Resource> dispositionResources = Resources(disposition, hasLegacyFuneralHomeData ? funeralHome : null);
+        if (dispositionResources.Count > 0) dcrComposition.DecedentDisposition = (dispositionResources, null);
+        List<Resource> cremationResources = Resources(hasNewCremationData ? funeralHome : null);
+        if (cremationResources.Count > 0) dcrComposition.CremationClearanceInfo = (cremationResources, null);
+        RemoveDcrSectionIfEmpty(composition, "DecedentDemographics", demographicResources.Count == 0);
+        RemoveDcrSectionIfEmpty(composition, "DeathInvestigation", deathInvestigationResources.Count == 0);
+        RemoveDcrSectionIfEmpty(composition, "DeathCertification", deathCertificationResources.Count == 0);
+        RemoveDcrSectionIfEmpty(composition, "DecedentDisposition", dispositionResources.Count == 0);
+        RemoveDcrSectionIfEmpty(composition, "death-certificate-data-review", true);
+        RemoveDcrSectionIfEmpty(composition, "cremation-clearance-info", cremationResources.Count == 0);
 
-        Bundle document = BundleDocumentMdiDcr.Create(new Identifier("urn:ietf:rfc:3986", $"urn:uuid:{Guid.NewGuid()}"), composition);
-        document.Id = $"bundle-document-{id}";
+        Bundle document = BundleDocumentMdiDcr.Create(new Identifier("urn:ietf:rfc:3986", $"urn:uuid:{DeterministicUuid($"dcr-document|{id}")}"), composition);
+        document.Id = $"bundle-document-dcr-{id}";
         List<Resource?> dcrResources = [patient, practitioner, submitter, funeralHome, deathDate, manner, injury, disposition, certification, deathLocation, injuryLocation];
         dcrResources.AddRange(causes);
         AppendResources(document, dcrResources);
@@ -252,10 +275,48 @@ public sealed class MdiFhirMapper
         MessageHeader header = MessageHeaderDeathCertificateReview.Create("urn:mdi:import", reason, document);
         header.Id = $"message-header-{id}";
         Bundle message = BundleMessageDeathCertificateReview.Create(header);
-        message.Id = $"bundle-{id}";
+        message.Id = $"bundle-dcr-{id}";
         message.TimestampElement = Instant.Now();
-        AppendResources(message, dcrResources);
         return message;
+    }
+
+    private static bool HasImportedDemographicData(ImportRecord record) =>
+        HasAnyValue(record,
+            "FIRSTNAME", "MIDNAME", "LASTNAME", "First Name", "Middle Name", "Last Name", "Decedent Name",
+            "GENDER", "Decedent SexAtDeath", "Decedent Sex", "BIRTHDATE", "Decedent DOB", "Decedent SSN", "SSN", "SSNNUMBER",
+            "MRNNUMBER", "POSSIBLEID", "LANGUAGE", "MARITAL", "Decedent Marital status", "RACE", "Decedent Race", "ETHNICITY", "Decedent Ethnicity") ||
+        BuildAddress(record, "RES") is not null;
+
+    private static bool HasImportedCertifierData(ImportRecord record) =>
+        HasAnyValue(record,
+            "MENAME", "Medical Examiner Name", "CERTIFIER_NAME", "Certifier Name", "CERTIFIER_TYPE", "Certifier Type",
+            "MEPHONE", "Medical Examiner Phone Number", "Certifier ID", "CERTIFIER_IDENTIFIER", "Certifier ID System", "CERTIFIER_IDENTIFIER_SYSTEM") ||
+        BuildAddress(record, "ME") is not null;
+
+    private static bool HasLegacyFuneralHomeData(ImportRecord record) =>
+        HasExactValue(record,
+            "FUNERAL_HOME_NAME", "Funeral Home Name", "FUNERAL_HOME_PHONE", "Funeral Home Phone Number",
+            "FUNERAL_HOME_FAX", "Funeral Home Fax Number", "FUNERAL_HOME_STREET", "FUNERAL_HOME_CITY",
+            "FUNERAL_HOME_COUNTY", "FUNERAL_HOME_STATE", "FUNERAL_HOME_ZIP", "Funeral Home Address: Street",
+            "Funeral Home Address: City", "Funeral Home Address: County", "Funeral Home Address: State, U.S. Territory or Canadian Province",
+            "Funeral Home Address: Postal Code", "Funeral Home Address: Country");
+
+    private static bool HasNewCremationData(ImportRecord record) =>
+        HasExactValue(record,
+            "Funeral Home: Name", "Funeral Home: Phone", "Funeral Home: Fax", "Funeral Home: Street",
+            "Funeral Home: City", "Funeral Home: County", "Funeral Home: State, U.S. Territory or Canadian Province",
+            "Funeral Home: Postal Code");
+
+    private static bool HasAnyValue(ImportRecord record, params string[] names) => names.Any(name => record.Get(name) is not null);
+
+    private static bool HasExactValue(ImportRecord record, params string[] names) => names.Any(name =>
+        record.Fields.TryGetValue(name, out string? value) && !string.IsNullOrWhiteSpace(value));
+
+    private static void RemoveDcrSectionIfEmpty(Composition composition, string code, bool remove)
+    {
+        if (!remove) return;
+        string normalizedCode = ImportRecord.Normalize(code);
+        composition.Section.RemoveAll(section => section.Code?.Coding.Any(coding => ImportRecord.Normalize(coding.Code ?? "") == normalizedCode) == true);
     }
 
     private static Patient CreatePatient(ImportRecord record, string id)
@@ -286,6 +347,8 @@ public sealed class MdiFhirMapper
         }
         if (record.Get("MRNNUMBER") is { } mrn)
             patient.Identifier.Add(new Identifier("urn:mdi:mrn", mrn) { Use = Identifier.IdentifierUse.Usual, Type = CodedConcept("http://terminology.hl7.org/CodeSystem/v2-0203", "MR", "Medical record number") });
+        if (record.Get("POSSIBLEID", "Possible ID") is { } possibleId)
+            patient.Identifier.Add(new Identifier("urn:mdi:possible-id", possibleId) { Use = Identifier.IdentifierUse.Usual, Type = CodedConcept("http://terminology.hl7.org/CodeSystem/v2-0203", "PI", "Patient internal identifier") });
         if (patient.Identifier.Count == 0)
         {
             Identifier absentIdentifier = new();
@@ -309,8 +372,27 @@ public sealed class MdiFhirMapper
         if (record.Get("MEPHONE", "Medical Examiner Phone Number") is { } phone)
             practitioner.Telecom = [new ContactPoint(ContactPoint.ContactPointSystem.Phone, ContactPoint.ContactPointUse.Work, phone)];
         if (BuildAddress(record, "ME") is { } address) { address.Use = Address.AddressUse.Work; practitioner.Address = [address]; }
+        if (record.Get("Certifier ID", "CERTIFIER_IDENTIFIER") is { } identifierValue)
+        {
+            string? identifierSystem = IdentifierSystem(record.Get("Certifier ID System", "CERTIFIER_IDENTIFIER_SYSTEM"));
+            practitioner.Identifier.Add(new Identifier
+            {
+                Use = Identifier.IdentifierUse.Usual,
+                System = identifierSystem,
+                Value = identifierValue
+            });
+        }
         return practitioner;
     }
+
+    private static string? IdentifierSystem(string? value) => string.IsNullOrWhiteSpace(value)
+        ? null
+        : ImportRecord.Normalize(value) switch
+        {
+            "npi" => "http://hl7.org/fhir/sid/us-npi",
+            "ss" or "ssn" => "http://hl7.org/fhir/sid/us-ssn",
+            _ => value.Trim()
+        };
 
     private static Practitioner? CreateSubmitter(ImportRecord record, string id)
     {
@@ -332,12 +414,14 @@ public sealed class MdiFhirMapper
 
     private static Organization? CreateFuneralHome(ImportRecord record, string id)
     {
-        string? name = record.Get("FUNERAL_HOME_NAME", "Funeral Home Name");
-        Address? address = BuildAddress(record, "Funeral Home Address");
-        string? phone = record.Get("FUNERAL_HOME_PHONE", "Funeral Home Phone Number");
-        string? fax = record.Get("FUNERAL_HOME_FAX", "Funeral Home Fax Number");
+        // Support new labels with precedence over legacy aliases
+        string? name = GetExactValue(record, "Funeral Home: Name", "FUNERAL_HOME_NAME", "Funeral Home Name");
+        // Handle address with new label support
+        Address? address = BuildAddress(record, "Funeral Home Address", Address.AddressUse.Work);
+        string? phone = GetExactValue(record, "Funeral Home: Phone", "FUNERAL_HOME_PHONE", "Funeral Home Phone Number");
+        string? fax = GetExactValue(record, "Funeral Home: Fax", "FUNERAL_HOME_FAX", "Funeral Home Fax Number");
         if (name is null && address is null && phone is null && fax is null) return null;
-        Organization organization = UsCoreOrganization.Create(name ?? "Funeral home");
+        Organization organization = GaTech.Chai.Vrdr.VrdrFuneralHome.Create(name ?? "Funeral home");
         organization.Id = id;
         if (address is not null) organization.Address = [address];
         organization.Telecom = [];
@@ -349,7 +433,7 @@ public sealed class MdiFhirMapper
     private static Organization? CreateLaboratory(ImportRecord record, string id)
     {
         string? name = record.Get("Toxicology Lab Name");
-        Address? address = BuildAddress(record, "Lab Address");
+        Address? address = BuildAddress(record, "Lab Address", Address.AddressUse.Work);
         if (name is null && address is null) return null;
         Organization organization = UsCoreOrganization.Create(name ?? "Toxicology laboratory");
         organization.Id = id;
@@ -383,7 +467,7 @@ public sealed class MdiFhirMapper
         if (string.IsNullOrWhiteSpace(cause)) return;
         string interval = record.Get(durationKey, durationLabel) ?? "unknown";
         Observation observation = ObservationMdiCauseOfDeathPart1.Create(patient, practitioner, cause, line, interval);
-        observation.Id = $"observation-{SafeId(patient.Id ?? "case")}-cause-part1-{line}";
+        observation.Id = $"observation-{StableToken(patient.Id ?? "case", 24)}-cause-part1-{line}";
         observation.Status = ObservationStatus.Final;
         causes.Add(observation);
     }
@@ -435,8 +519,18 @@ public sealed class MdiFhirMapper
         string unit = record.Get("AGEUNIT") ?? (raw?.Contains(' ') == true ? raw.Split(' ', StringSplitOptions.RemoveEmptyEntries).Skip(1).FirstOrDefault() : null) ?? "a";
         Observation observation = VrdrDecedentAge.Create(patient);
         observation.Id = $"observation-{id}-age"; observation.Status = ObservationStatus.Final;
-        observation.Value = new Quantity(age, unit) { System = "http://unitsofmeasure.org", Code = unit }; return observation;
+        observation.Value = new Quantity(age, unit) { System = "http://unitsofmeasure.org", Code = AgeUnitCode(unit) }; return observation;
     }
+
+    private static string? AgeUnitCode(string unit) => ImportRecord.Normalize(unit) switch
+    {
+        "a" or "y" or "yr" or "year" or "years" => "a",
+        "mo" or "month" or "months" => "mo",
+        "wk" or "week" or "weeks" => "wk",
+        "d" or "day" or "days" => "d",
+        "h" or "hr" or "hour" or "hours" => "h",
+        _ => null
+    };
 
     private static Observation? CreateDisposition(ImportRecord record, Patient patient, string id)
     {
@@ -447,9 +541,27 @@ public sealed class MdiFhirMapper
     private static Procedure? CreateCertification(ImportRecord record, Patient patient, Practitioner practitioner, string id)
     {
         if (record.Get("CERTIFIER_NAME", "Certifier Name", "CERTIFIER_TYPE", "Certifier Type") is null) return null;
-        Procedure procedure = ProcedureDeathCertification.Create(patient); procedure.Id = $"procedure-{id}-death-certification"; procedure.Status = EventStatus.Completed;
-        procedure.ProcedureDeathCertification().Certifier = (MdiVsCertifierTypes.MedicalExaminerCornerExamination, practitioner);
-        if (DateTimeValue(record.Get("REPORTDATE"), record.Get("REPORTTIME")) is { } date) procedure.Performed = new FhirDateTime(date); return procedure;
+        Procedure procedure = VrdrDeathCertification.Create(patient); procedure.Id = $"procedure-{id}-death-certification"; procedure.Status = EventStatus.Completed;
+        Procedure.PerformerComponent performer = new() { Actor = practitioner.AsReference() };
+        if (record.Get("CERTIFIER_TYPE", "Certifier Type") is { } certifierType)
+            performer.Function = CertifierType(certifierType);
+        procedure.Performer = [performer];
+        string? certifiedDate = record.Get("Certified Date");
+        string? reportDate = certifiedDate ?? record.Get("REPORTDATE");
+        string? reportTime = record.Get("REPORTTIME");
+        if (DateTimeValue(reportDate, reportTime) is { } date) procedure.Performed = new FhirDateTime(date); return procedure;
+    }
+
+    private static CodeableConcept CertifierType(string value)
+    {
+        CodeableConcept concept = ImportRecord.Normalize(value) switch
+        {
+            "medicalexaminercoroner" or "medicalexaminerorcoroner" or "deathcertificationbymedicalexaminerorcoronerprocedure" => VrdrCertifierTypesVs.DeathCertByCME,
+            "pronouncingcertifyingphysician" or "deathcertificationandverificationbyphysicianprocedure" => VrdrCertifierTypesVs.DeathCertAndVerifByPhysician,
+            "certifyingphysician" or "deathcertificationbyphysicianprocedure" => VrdrCertifierTypesVs.DeathCertByPhysician,
+            _ => VrdrCertifierTypesVs.Other
+        };
+        return (CodeableConcept)concept.DeepCopy();
     }
 
     private static Observation? CreatePregnancy(ImportRecord record, Patient patient, string id)
@@ -538,13 +650,13 @@ public sealed class MdiFhirMapper
         _ => MdiVsYesNoUnknown.UNK
     };
 
-    private static Address? BuildAddress(ImportRecord record, string prefix)
+    private static Address? BuildAddress(ImportRecord record, string prefix, Address.AddressUse use = Address.AddressUse.Home)
     {
         string? street = AddressPart(record, prefix, "Street"); string? city = AddressPart(record, prefix, "City");
         string? county = AddressPart(record, prefix, "County"); string? state = AddressPart(record, prefix, "State, U.S. Territory or Canadian Province");
         string? zip = AddressPart(record, prefix, "Postal Code"); string? country = AddressPart(record, prefix, "Country");
         if (new[] { street, city, county, state, zip, country }.All(value => value is null)) return null;
-        return new Address { Use = Address.AddressUse.Home, Line = street is null ? null : [street], City = city, District = county, State = state, PostalCode = zip, Country = country };
+        return new Address { Use = use, Line = street is null ? null : [street], City = city, District = county, State = state, PostalCode = zip, Country = country };
     }
 
     private static string? AddressPart(ImportRecord record, string prefix, string part)
@@ -557,8 +669,18 @@ public sealed class MdiFhirMapper
             case "DEATHLOCATION": names.Add($"Location of Death: {part}"); break;
             case "INJURYLOCATION": names.Add($"Location of Injury: {part}"); break;
             case "AUTOPSYLOCATION": names.Add($"Autopsy Performed Location: {part}"); break;
+            case "Funeral Home Address": names.Add($"Funeral Home: {part}"); break;
         }
-        return record.Get(names.ToArray());
+        return GetExactValue(record, names.ToArray());
+    }
+
+    private static string? GetExactValue(ImportRecord record, params string[] names)
+    {
+        foreach (string name in names)
+        {
+            if (record.Fields.TryGetValue(name, out string? value) && !string.IsNullOrWhiteSpace(value)) return value.Trim();
+        }
+        return null;
     }
 
     private static (List<string>, string?) Name(ImportRecord record)
@@ -596,9 +718,11 @@ public sealed class MdiFhirMapper
 
     private static string? DateTimeValue(string? date, string? time)
     {
-        string? onlyDate = DateOnly(date); if (onlyDate is null) return null; if (string.IsNullOrWhiteSpace(time)) return onlyDate;
+        string? onlyDate = DateOnly(date);
+        if (onlyDate is null) return null;
+        if (string.IsNullOrWhiteSpace(time)) return onlyDate;
         if (!DateTime.TryParse(time, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out DateTime parsed)) throw new FormatException($"Invalid time value '{time}'.");
-        return $"{onlyDate}T{parsed:HH:mm:ss}";
+        return $"{onlyDate}T{parsed:HH:mm:ss}Z";
     }
 
     private static CodeableConcept PlaceOfDeath(string value) => value.ToLowerInvariant() switch
@@ -615,14 +739,61 @@ public sealed class MdiFhirMapper
 
     private static CodeableConcept DcrReason(string? value)
     {
-        string reason = value ?? "DC_MED_DATA_Q_REQ";
+        string reason = string.IsNullOrWhiteSpace(value) ? "DC_MED_DATA_Q_REQ" : value.Trim();
+        CodeableConcept? knownReason = reason.ToUpperInvariant() switch
+        {
+            "DC_MED_DATA_Q_REQ" => MdiCodeSystem.CsDeathCertReviewExample.DcMedDataQReq,
+            "DC_MED_DATA_Q_RSP" => MdiCodeSystem.CsDeathCertReviewExample.DcMedDataQRsp,
+            "DC_PER_DATA_Q_REQ" => MdiCodeSystem.CsDeathCertReviewExample.DcPerDataQReq,
+            "DC_PER_DATA_Q_RSP" => MdiCodeSystem.CsDeathCertReviewExample.DcPerDataQRsp,
+            "CREM_C_REQ" => MdiCodeSystem.CsDeathCertReviewExample.CremCReq,
+            "CREM_C_RSP" => MdiCodeSystem.CsDeathCertReviewExample.CremCRsp,
+            _ => null
+        };
+        if (knownReason is not null)
+        {
+            CodeableConcept copy = (CodeableConcept)knownReason.DeepCopy();
+            foreach (Coding coding in copy.Coding)
+            {
+                if (coding.System is not null) coding.System = coding.System.Trim();
+            }
+            return copy;
+        }
         return CodedConcept("http://hl7.org/fhir/us/mdi/CodeSystem/cs-death-cert-review-example", reason, reason);
     }
 
-    private static string SafeId(string value)
+    private static string CaseKey(ImportRecord record, string prefix)
     {
-        string id = new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).Take(48).ToArray());
-        return id.Length > 0 ? id : Guid.NewGuid().ToString("N");
+        return record.Get("BASEFHIRID", "File Id", "MDICASEID", "EDRSCASEID") ??
+               $"{prefix}-{StableToken(record.CanonicalFingerprint(), 24)}";
+    }
+
+    private static string CaseToken(ImportRecord record, string caseKey)
+    {
+        string identity = string.IsNullOrWhiteSpace(record.IdentityDiscriminator)
+            ? caseKey
+            : $"{caseKey}|{record.IdentityDiscriminator}";
+        return StableToken(identity, 24);
+    }
+
+    private static string CanonicalRow(Dictionary<string, string?> row) => string.Join(
+        "\n",
+        row.OrderBy(pair => ImportRecord.Normalize(pair.Key), StringComparer.Ordinal)
+            .ThenBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(pair => $"{ImportRecord.Normalize(pair.Key)}={pair.Value?.Trim() ?? ""}"));
+
+    private static string StableToken(string value, int length)
+    {
+        string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+        return hash[..Math.Min(length, hash.Length)];
+    }
+
+    private static string DeterministicUuid(string value)
+    {
+        byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value))[..16];
+        bytes[6] = (byte)((bytes[6] & 0x0F) | 0x50);
+        bytes[8] = (byte)((bytes[8] & 0x3F) | 0x80);
+        return new Guid(bytes).ToString();
     }
 
     private static string? NullIfWhiteSpace(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
