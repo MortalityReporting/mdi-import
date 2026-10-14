@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using GaTech.Chai.Vrdr;
 using GaTech.Chai.Share;
@@ -598,6 +599,49 @@ public sealed class MdiFhirMapperTests
                 Assert.Equal("work", telecomPoint["use"]?.GetValue<string>());
             }
         }
+    }
+
+    [Fact]
+    public void MapsDcrWithSignatureData()
+    {
+        ImportRecord record = new(ImportTemplateKind.Dcr);
+        record.Fields["BASEFHIRID"] = "dcr-signature";
+        record.Fields["Funeral Home Name"] = "Signature Funeral Home";
+        record.SignatureData = [1, 2, 3];
+        record.SignatureContentType = "image/jpeg";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+
+        // Find the nested document Bundle, not the outer message Bundle
+        JsonObject? documentBundle = FindResourceInBundle(bundle, "Bundle");
+        Assert.NotNull(documentBundle);
+
+        // Check that the document bundle has a signature
+        JsonObject signature = documentBundle!["signature"]!.AsObject();
+
+        // Check that signature does not include contentType or sigFormat
+        Assert.Null(signature["contentType"]);
+        Assert.Null(signature["sigFormat"]);
+
+        // Check that signature.who references an Organization
+        string whoReference = signature["who"]!["reference"]!.GetValue<string>();
+        Assert.StartsWith("Organization/", whoReference, StringComparison.Ordinal);
+
+        // Check signature data is base64 encoded [1,2,3] = "AQID"
+        Assert.Equal("AQID", signature["data"]?.GetValue<string>());
+
+        // Check that signature.type coding is present
+        JsonArray? signatureTypes = signature["type"]?.AsArray();
+        Assert.NotNull(signatureTypes);
+        Assert.NotEmpty(signatureTypes);
+        JsonObject signatureType = signatureTypes![0]!.AsObject();
+        Assert.Equal("1.2.840.10065.1.12.1.1", signatureType["code"]?.GetValue<string>());
+
+        // Check that signature when is present
+        Assert.NotNull(signature["when"]?.GetValue<string>());
+
+        // Check that the outer bundle has no signature
+        Assert.Null(bundle["signature"]);
     }
 
     [Fact]

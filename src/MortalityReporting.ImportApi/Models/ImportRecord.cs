@@ -20,6 +20,8 @@ public sealed class ImportRecord
     public bool HasCaseSpecificData { get; set; }
     public string? SourceKey { get; set; }
     public string? IdentityDiscriminator { get; set; }
+    public byte[]? SignatureData { get; set; }
+    public string? SignatureContentType { get; set; }
     public Dictionary<string, string?> Fields { get; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> ExpectedFields { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, List<Dictionary<string, string?>>> Tables { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -47,7 +49,7 @@ public sealed class ImportRecord
         return builder.ToString();
     }
 
-    public bool HasData => Fields.Values.Any(value => !string.IsNullOrWhiteSpace(value)) || Tables.Values.Any(table => table.Count > 0);
+    public bool HasData => Fields.Values.Any(value => !string.IsNullOrWhiteSpace(value)) || Tables.Values.Any(table => table.Count > 0) || SignatureData is { Length: > 0 };
 
     public string CanonicalFingerprint()
     {

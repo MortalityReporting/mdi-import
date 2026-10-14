@@ -399,6 +399,23 @@ public sealed class ImportFileParserTests
         Assert.Equal(20, specimen["collection"]!["quantity"]!["value"]!.GetValue<decimal>());
     }
 
+    [Fact]
+    public async Task ParsesDcrJackReacherFixtureWithSignature()
+    {
+        string? fixturePath = FindRepositoryFixture("DCR-JackReacher.xlsx");
+        Assert.NotNull(fixturePath);
+
+        await using FileStream stream = File.OpenRead(fixturePath!);
+        IReadOnlyList<ImportRecord> records = await parser.ParseAsync(stream, "DCR-JackReacher.xlsx", CancellationToken.None);
+
+        Assert.Single(records);
+        ImportRecord record = records[0];
+        Assert.Equal(ImportTemplateKind.Dcr, record.Kind);
+        Assert.NotNull(record.SignatureData);
+        Assert.NotEmpty(record.SignatureData);
+        Assert.Equal("image/jpeg", record.SignatureContentType);
+    }
+
     private static string? FindRepositoryFixture(string fileName)
     {
         DirectoryInfo? directory = new(AppContext.BaseDirectory);

@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.IO.Compression;
+using System.Xml.Linq;
 using ClosedXML.Excel;
 using CsvHelper;
 using CsvHelper.Configuration;
@@ -56,7 +58,10 @@ public sealed class ImportFileParser
     {
         try
         {
-            using XLWorkbook workbook = new(input);
+            using MemoryStream workbookStream = new();
+            input.CopyTo(workbookStream);
+            byte[] workbookBytes = workbookStream.ToArray();
+            using XLWorkbook workbook = new(new MemoryStream(workbookBytes));
             List<ImportRecord> schemaRecords = [];
             bool foundSchema = false;
             ImportTemplateKind schemaKind = workbook.Worksheets.Any(sheet =>
@@ -86,6 +91,8 @@ public sealed class ImportFileParser
                 {
                     foundSchema = true;
                     List<ImportRecord> sheetRecords = ParseSchema(rows, caseColumns, schemaKind);
+                    if (schemaKind == ImportTemplateKind.Dcr)
+                        AttachSignatureImages(workbookBytes, worksheet.Name, used.RangeAddress.FirstAddress.RowNumber, used.RangeAddress.FirstAddress.ColumnNumber, rows, caseColumns, sheetRecords);
                     MergeSchemaRecords(schemaRecords, sheetRecords);
                 }
                 else if (!foundSchema)
@@ -100,6 +107,105 @@ public sealed class ImportFileParser
         }
         catch (ImportParseException) { throw; }
         catch (Exception exception) { throw new ImportParseException($"Unable to read XLSX workbook: {exception.Message}"); }
+    }
+
+    private static void AttachSignatureImages(
+        byte[] workbookBytes,
+        string worksheetName,
+        int firstRow,
+        int firstColumn,
+        List<List<string?>> rows,
+        List<(int Index, string Name)> caseColumns,
+        List<ImportRecord> records)
+    {
+        HashSet<int> signatureRows = rows
+            .Select((row, index) => (row, rowNumber: firstRow + index))
+            .Where(item => item.row.Any(value => ImportRecord.Normalize(value ?? "") == "funeralhomesignature"))
+            .Select(item => item.rowNumber)
+            .ToHashSet();
+        if (signatureRows.Count == 0) return;
+
+        foreach ((int row, int column, byte[] data, string contentType) in ReadEmbeddedSignatureImages(workbookBytes, worksheetName, signatureRows))
+        {
+            bool hasCaseColumn = caseColumns.Any(item => firstColumn + item.Index == column);
+            (int Index, string Name) caseColumn = caseColumns.FirstOrDefault(item => firstColumn + item.Index == column);
+            ImportRecord? record = hasCaseColumn
+                ? records.FirstOrDefault(item => string.Equals(item.SourceKey, caseColumn.Name, StringComparison.OrdinalIgnoreCase))
+                : records.Count == 1 ? records[0] : null;
+            if (record is null) continue;
+            record.SignatureData = data;
+            record.SignatureContentType = contentType;
+            record.ExpectedFields.Add("Funeral Home: Signature");
+        }
+    }
+
+    private static List<(int Row, int Column, byte[] Data, string ContentType)> ReadEmbeddedSignatureImages(
+        byte[] workbookBytes,
+        string worksheetName,
+        HashSet<int> signatureRows)
+    {
+        using ZipArchive archive = new(new MemoryStream(workbookBytes), ZipArchiveMode.Read);
+        string? worksheetPath = WorksheetPath(archive, worksheetName);
+        if (worksheetPath is null) return [];
+        ZipArchiveEntry? worksheetEntry = archive.GetEntry(worksheetPath);
+        if (worksheetEntry is null) return [];
+        XNamespace spreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        XDocument worksheet = XDocument.Load(worksheetEntry.Open());
+        List<ZipArchiveEntry> media = archive.Entries
+            .Where(entry => entry.FullName.StartsWith("xl/media/", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (media.Count == 0) return [];
+
+        ZipArchiveEntry image = media[0];
+        using MemoryStream imageData = new();
+        using (Stream imageStream = image.Open()) imageStream.CopyTo(imageData);
+        string contentType = image.FullName.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? "image/png" :
+            image.FullName.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) || image.FullName.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ? "image/jpeg" :
+            image.FullName.EndsWith(".gif", StringComparison.OrdinalIgnoreCase) ? "image/gif" : "application/octet-stream";
+
+        List<(int Row, int Column, byte[] Data, string ContentType)> results = [];
+        foreach (XElement cell in worksheet.Descendants(spreadsheet + "c").Where(element => element.Attribute("vm") is not null))
+        {
+            string? reference = cell.Attribute("r")?.Value;
+            if (reference is null || !TryCellReference(reference, out int row, out int column) || !signatureRows.Contains(row)) continue;
+            results.Add((row, column, imageData.ToArray(), contentType));
+        }
+        return results;
+    }
+
+    private static string? WorksheetPath(ZipArchive archive, string worksheetName)
+    {
+        XNamespace spreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        XNamespace relationships = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        XNamespace packageRelationships = "http://schemas.openxmlformats.org/package/2006/relationships";
+        ZipArchiveEntry? workbookEntry = archive.GetEntry("xl/workbook.xml");
+        ZipArchiveEntry? relationshipsEntry = archive.GetEntry("xl/_rels/workbook.xml.rels");
+        if (workbookEntry is null || relationshipsEntry is null) return null;
+        XDocument workbook = XDocument.Load(workbookEntry.Open());
+        XDocument rels = XDocument.Load(relationshipsEntry.Open());
+        string? relationshipId = workbook.Descendants(spreadsheet + "sheet")
+            .FirstOrDefault(sheet => string.Equals(sheet.Attribute("name")?.Value, worksheetName, StringComparison.Ordinal))?
+            .Attribute(relationships + "id")?.Value;
+        string? target = rels.Descendants(packageRelationships + "Relationship")
+            .FirstOrDefault(relationship => relationship.Attribute("Id")?.Value == relationshipId)?
+            .Attribute("Target")?.Value;
+        if (target is null) return null;
+        return target.StartsWith("xl/", StringComparison.Ordinal) ? target : $"xl/{target.TrimStart('/')}";
+    }
+
+    private static bool TryCellReference(string reference, out int row, out int column)
+    {
+        int split = 0;
+        while (split < reference.Length && char.IsLetter(reference[split])) split++;
+        if (split == 0 || split == reference.Length || !int.TryParse(reference[split..], out row))
+        {
+            row = 0;
+            column = 0;
+            return false;
+        }
+        column = 0;
+        foreach (char character in reference[..split].ToUpperInvariant()) column = column * 26 + character - 'A' + 1;
+        return true;
     }
 
     private static List<ImportRecord> ParseSchema(List<List<string?>> rows, List<(int Index, string Name)> caseColumns, ImportTemplateKind kind)

@@ -37,6 +37,7 @@ public sealed class MdiFhirMapper
             };
             string json = new FhirJsonSerializer(new SerializerSettings { Pretty = false }).SerializeToString(bundle);
             JsonObject result = JsonNode.Parse(json)?.AsObject() ?? throw new InvalidOperationException("FHIR serializer returned invalid JSON.");
+            if (record.Kind == ImportTemplateKind.Dcr) AddDcrSignature(result, record);
             RewriteResourceUris(result);
             return result;
         }
@@ -370,6 +371,32 @@ public sealed class MdiFhirMapper
         message.Id = $"bundle-dcr-{id}";
         message.TimestampElement = Instant.Now();
         return message;
+    }
+
+    private static void AddDcrSignature(JsonObject message, ImportRecord record)
+    {
+        if (record.SignatureData is not { Length: > 0 }) return;
+        JsonObject? document = message["entry"]?.AsArray()
+            .Select(entry => entry?["resource"]?.AsObject())
+            .FirstOrDefault(resource => resource?["resourceType"]?.GetValue<string>() == "Bundle" &&
+                resource["meta"]?["profile"]?.AsArray().Any(profile => profile?.GetValue<string>()?.EndsWith("Bundle-document-mdi-dcr", StringComparison.Ordinal) == true) == true);
+        JsonObject? organization = document?["entry"]?.AsArray()
+            .Select(entry => entry?["resource"]?.AsObject())
+            .FirstOrDefault(resource => resource?["resourceType"]?.GetValue<string>() == "Organization");
+        string? organizationId = organization?["id"]?.GetValue<string>();
+        if (document is null || string.IsNullOrWhiteSpace(organizationId)) return;
+        document["signature"] = new JsonObject
+        {
+            ["type"] = new JsonArray(new JsonObject
+            {
+                ["system"] = "urn:iso-astm:E1762-95:2013",
+                ["code"] = "1.2.840.10065.1.12.1.1",
+                ["display"] = "Author's Signature"
+            }),
+            ["when"] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+            ["who"] = new JsonObject { ["reference"] = $"Organization/{organizationId}" },
+            ["data"] = Convert.ToBase64String(record.SignatureData)
+        };
     }
 
     private static bool HasImportedDemographicData(ImportRecord record) =>
