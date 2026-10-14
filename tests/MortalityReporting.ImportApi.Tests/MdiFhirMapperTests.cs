@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using GaTech.Chai.Vrdr;
+using GaTech.Chai.Share;
 using MortalityReporting.ImportApi.Models;
 using MortalityReporting.ImportApi.Services;
 using Xunit;
@@ -8,29 +9,6 @@ namespace MortalityReporting.ImportApi.Tests;
 
 public sealed class MdiFhirMapperTests
 {
-    [Fact]
-    public void MapsCoreMdiFieldsUsingMdiProfiles()
-    {
-        ImportRecord record = new();
-        record.Fields["BASEFHIRID"] = "case-1";
-        record.Fields["FIRSTNAME"] = "Jane";
-        record.Fields["LASTNAME"] = "Doe";
-        record.Fields["GENDER"] = "Female";
-        record.Fields["CAUSEA"] = "Fentanyl toxicity";
-        record.Fields["DURATIONA"] = "minutes to hours";
-        record.Fields["MANNER"] = "Accidental death";
-        record.Fields["CDEATHDATE"] = "01/08/2022";
-        record.Fields["CDEATHTIME"] = "3:30 PM";
-
-        JsonObject bundle = new MdiFhirMapper().Map(record);
-        Assert.Equal("Bundle", bundle["resourceType"]?.GetValue<string>());
-        Assert.Contains(bundle["meta"]!["profile"]!.AsArray(), value => value!.GetValue<string>().EndsWith("Bundle-document-mdi-and-edrs", StringComparison.Ordinal));
-        JsonArray entries = bundle["entry"]!.AsArray();
-        Assert.Equal("Composition", entries[0]! ["resource"]!["resourceType"]!.GetValue<string>());
-        Assert.Contains(entries, entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Patient");
-        Assert.Contains(entries, entry => entry!["resource"]!["meta"]!["profile"]!.AsArray().Any(profile => profile!.GetValue<string>().EndsWith("Observation-mdi-cause-of-death-part1", StringComparison.Ordinal)));
-    }
-
     [Fact]
     public void MapsSocialSecurityNumberToPatientIdentifier()
     {
@@ -60,36 +38,327 @@ public sealed class MdiFhirMapperTests
     }
 
     [Fact]
-    public void MapsToxicologyTablesToMdiMessageBundle()
+    public void MapsCoreMdiFieldsUsingMdiProfiles()
     {
-        ImportRecord record = new(ImportTemplateKind.Toxicology);
-        record.Fields["File Id"] = "tox-1";
-        record.Fields["MDI Case Number"] = "ME-1";
-        record.Fields["Decedent Name"] = "Jane Doe";
-        record.Fields["Toxicology Lab Name"] = "State Forensic Laboratory";
-        record.Fields["Lab Address: City"] = "Atlanta";
-        record.Tables["Specimens"] = [new Dictionary<string, string?> { ["Name"] = "Blood", ["Identifier"] = "S-1" }];
-        record.Tables["Results"] = [new Dictionary<string, string?> { ["Analyte/Analysis"] = "Ethanol", ["Specimen"] = "Blood", ["Value"] = "54 mg/L" }];
-        record.Tables["Notes"] = [new Dictionary<string, string?> { ["Note Content"] = "Interpretive note" }];
+        ImportRecord record = new();
+        record.Fields["BASEFHIRID"] = "case-1";
+        record.Fields["FIRSTNAME"] = "Jane";
+        record.Fields["LASTNAME"] = "Doe";
+        record.Fields["GENDER"] = "Female";
+        record.Fields["CAUSEA"] = "Fentanyl toxicity";
+        record.Fields["DURATIONA"] = "minutes to hours";
+        record.Fields["MANNER"] = "Accidental death";
+        record.Fields["CDEATHDATE"] = "01/08/2022";
+        record.Fields["CDEATHTIME"] = "3:30 PM";
 
         JsonObject bundle = new MdiFhirMapper().Map(record);
-        Assert.Equal("message", bundle["type"]?.GetValue<string>());
-        Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "DiagnosticReport");
-        Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Observation");
+        Assert.Equal("Bundle", bundle["resourceType"]?.GetValue<string>());
+        Assert.Contains(bundle["meta"]!["profile"]!.AsArray(), value => value!.GetValue<string>().EndsWith("Bundle-document-mdi-and-edrs", StringComparison.Ordinal));
+        JsonArray entries = bundle["entry"]!.AsArray();
+        Assert.Equal("Composition", entries[0]! ["resource"]!["resourceType"]!.GetValue<string>());
+        Assert.Contains(entries, entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Patient");
+        Assert.Contains(entries, entry => entry!["resource"]!["meta"]!["profile"]!.AsArray().Any(profile => profile!.GetValue<string>().EndsWith("Observation-mdi-cause-of-death-part1", StringComparison.Ordinal)));
+    }
 
-        // Assert Toxicology Lab Organization constraints
-        JsonObject? organizationEntry = bundle["entry"]!.AsArray()
-            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Organization")?.AsObject();
-        Assert.NotNull(organizationEntry);
-        JsonObject? organization = organizationEntry!["resource"]!.AsObject();
-        // Assert the generated Organization has a nonblank name
-        Assert.NotNull(organization!["name"]?.GetValue<string>());
-        Assert.NotEmpty(organization!["name"]!.GetValue<string>());
-        // Assert address use is work
-        Assert.NotNull(organization!["address"]?.AsArray()[0]!["use"]);
-        Assert.Equal("work", organization!["address"]!.AsArray()[0]!["use"]?.GetValue<string>());
+    [Fact]
+    public void MapsToxicologyScalarDatesToDiagnosticReportAndSpecimen()
+    {
+        ImportRecord record = new(ImportTemplateKind.Toxicology);
+        record.Fields["File Id"] = "tox-scalar-dates";
+        record.Fields["MDI Case Number"] = "ME-1";
+        record.Fields["Decedent Name"] = "Jane Doe";
+        // Set scalar date fields
+        record.Fields["Date/Time of Specimen Collection"] = "2023-05-15T09:30:00";
+        record.Fields["Date/Time of Receipt"] = "2023-05-15T10:00:00";
+        record.Fields["Date/Time of Issuance"] = "2023-05-15T11:00:00";
 
-        Assert.Contains(bundle["entry"]!.AsArray(), entry => entry!["resource"]!["conclusion"]?.GetValue<string>() == "Interpretive note");
+        // Add one specimen row with minimal data (no Date/Time Collected)
+        record.Tables["Specimens"] = [new Dictionary<string, string?> { ["Name"] = "Blood", ["Identifier"] = "S-1" }];
+        record.Tables["Results"] = [new Dictionary<string, string?> { ["Analyte/Analysis"] = "Ethanol", ["Specimen"] = "Blood", ["Value"] = "54 mg/L" }];
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+
+        // Find DiagnosticReport
+        JsonObject? diagnosticReportEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "DiagnosticReport")?.AsObject();
+        Assert.NotNull(diagnosticReportEntry);
+        JsonObject diagnosticReport = diagnosticReportEntry!["resource"]!.AsObject();
+
+        // Assert effective is from Date/Time of Receipt
+        Assert.StartsWith("2023-05-15T10:00:00", diagnosticReport["effectiveDateTime"]?.GetValue<string>());
+
+        // Assert issued is from Date/Time of Issuance
+        Assert.StartsWith("2023-05-15T11:00:00", diagnosticReport["issued"]?.GetValue<string>());
+
+        // Find Specimen
+        JsonObject? specimenEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Specimen")?.AsObject();
+        Assert.NotNull(specimenEntry);
+        JsonObject specimen = specimenEntry!["resource"]!.AsObject();
+
+        // Assert collection.collected is from scalar Date/Time of Specimen Collection
+        Assert.NotNull(specimen["collection"]);
+        Assert.StartsWith("2023-05-15T09:30:00", specimen["collection"]!["collectedDateTime"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public void MapsToxicologyResultsWithMultipleAnalytesAndMethods()
+    {
+        ImportRecord record = new(ImportTemplateKind.Toxicology);
+        record.Fields["File Id"] = "tox-multi-analytes";
+        record.Fields["MDI Case Number"] = "ME-1";
+        record.Fields["Decedent Name"] = "Jane Doe";
+        // Set Date of Report Issuance
+        record.Fields["Date/Time of Issuance"] = "2024-01-22";
+
+        // Add one specimen row
+        record.Tables["Specimens"] = [new Dictionary<string, string?> { ["Name"] = "Blood", ["Identifier"] = "S-1" }];
+
+        // Add Results rows covering the specified analytes, methods, and values
+        record.Tables["Results"] = [
+            new Dictionary<string, string?> {
+                ["Analyte/Analysis"] = "http://loinc.org^LP1^Fentanyl",
+                ["Method"] = "http://snomed.info/sct^123^Mass spectrometry",
+                ["Value"] = "23 ng/mL",
+                ["Specimen"] = "Blood"
+            },
+            new Dictionary<string, string?> {
+                ["Analyte/Analysis"] = "Ethanol",
+                ["Method"] = "Screening",
+                ["Value"] = "Detected",
+                ["Specimen"] = "Blood"
+            },
+            new Dictionary<string, string?> {
+                ["Analyte/Analysis"] = "not tested",
+                ["Value"] = "",
+                ["Specimen"] = "Blood"
+            }
+        ];
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+
+        // Find all Observation resources
+        JsonObject[] observationsArray = bundle["entry"]!.AsArray()
+            .Where(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Observation")
+            .Select(entry => entry!["resource"]!.AsObject())
+            .ToArray();
+
+        Assert.Equal(3, observationsArray.Length);
+
+        // Find the Specimen resource
+        JsonObject? specimenEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Specimen")?.AsObject();
+        Assert.NotNull(specimenEntry);
+        JsonObject specimen = specimenEntry!["resource"]!.AsObject();
+
+        // Check first observation (Fentanyl)
+        JsonObject fentanylObservation = observationsArray[0];
+        Assert.Equal("http://loinc.org", fentanylObservation["code"]!["coding"]![0]!["system"]!.GetValue<string>());
+        Assert.Equal("LP1", fentanylObservation["code"]!["coding"]![0]!["code"]!.GetValue<string>());
+        Assert.Equal("Fentanyl", fentanylObservation["code"]!["coding"]![0]!["display"]!.GetValue<string>());
+
+        // Check first observation method (Mass spectrometry)
+        Assert.NotNull(fentanylObservation["method"]);
+        JsonObject methodCoding = (JsonObject)fentanylObservation["method"]!["coding"]![0]!;
+        Assert.Equal("http://snomed.info/sct", methodCoding["system"]!.GetValue<string>());
+        Assert.Equal("123", methodCoding["code"]!.GetValue<string>());
+        Assert.Equal("Mass spectrometry", methodCoding["display"]!.GetValue<string>());
+
+        // Check first observation valueString (Fentanyl)
+        Assert.Equal("23 ng/mL", fentanylObservation["valueString"]!.GetValue<string>());
+        Assert.Null(fentanylObservation["valueQuantity"]);
+
+        // Check specimen reference points to mapped Specimen resource
+
+        // Check specimen reference points to mapped Specimen resource
+        Assert.Contains(specimen["id"]!.GetValue<string>(), fentanylObservation["specimen"]!["reference"]!.GetValue<string>());
+
+        // Check second observation (Ethanol)
+        JsonObject ethanolObservation = observationsArray[1];
+        Assert.Equal("Ethanol", ethanolObservation["code"]!["text"]!.GetValue<string>());
+        Assert.Contains("Detected", ethanolObservation["valueString"]!.GetValue<string>());
+
+        // Check specimen reference
+        Assert.Contains(specimen["id"]!.GetValue<string>(), ethanolObservation["specimen"]!["reference"]!.GetValue<string>());
+
+        // Check third observation (not tested)
+        JsonObject notTestedObservation = observationsArray[2];
+        Assert.Equal("not tested", notTestedObservation["code"]!["text"]!.GetValue<string>());
+        Assert.Equal("Not Applicable", notTestedObservation["valueString"]!.GetValue<string>());
+
+        // Check specimen reference
+        Assert.Contains(specimen["id"]!.GetValue<string>(), notTestedObservation["specimen"]!["reference"]!.GetValue<string>());
+
+        // Assert all observations have effectiveDateTime beginning '2024-01-22'
+        foreach (JsonObject observation in observationsArray)
+        {
+            Assert.StartsWith("2024-01-22", observation["effectiveDateTime"]?.GetValue<string>());
+        }
+
+
+    }
+
+    [Fact]
+    public void MapsMdiCaseNumberToDiagnosticReportExtension()
+    {
+        ImportRecord record = new(ImportTemplateKind.Toxicology);
+        record.Fields["File Id"] = "tox-mdi-case-number";
+        record.Fields["Decedent Name"] = "Jane Doe";
+        record.Fields["MDI Case System"] = "urn:mdi:raven";
+        record.Fields["MDI Case Number"] = "25-0001";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+
+        // Find DiagnosticReport
+        JsonObject? diagnosticReportEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "DiagnosticReport")?.AsObject();
+        Assert.NotNull(diagnosticReportEntry);
+        JsonObject diagnosticReport = diagnosticReportEntry!["resource"]!.AsObject();
+
+        // Find extension URL http://hl7.org/fhir/us/mdi/StructureDefinition/Extension-tracking-number
+        // whose valueIdentifier.type.coding.code is mdi-case-number
+        JsonArray? extensions = diagnosticReport["extension"]?.AsArray();
+        Assert.NotNull(extensions);
+
+        JsonObject? trackingNumberExtension = extensions!
+            .FirstOrDefault(extension =>
+                ((JsonObject)extension!)["url"]?.GetValue<string>() == "http://hl7.org/fhir/us/mdi/StructureDefinition/Extension-tracking-number")?.AsObject();
+
+        Assert.NotNull(trackingNumberExtension);
+
+        // Navigate to valueIdentifier.type.coding.code
+        JsonObject valueIdentifier = ((JsonObject)trackingNumberExtension!["valueIdentifier"]!).AsObject();
+        JsonObject identifierType = ((JsonObject)valueIdentifier!["type"]!).AsObject();
+        JsonArray? codingArray = identifierType["coding"]?.AsArray();
+        Assert.NotNull(codingArray);
+        JsonObject coding = ((JsonObject)codingArray![0]!).AsObject();
+
+        Assert.Equal("mdi-case-number", coding["code"]?.GetValue<string>());
+
+        // Assert valueIdentifier.system is urn:mdi:raven
+        Assert.Equal("urn:mdi:raven", valueIdentifier["system"]?.GetValue<string>());
+
+        // Assert value is 25-0001
+        Assert.Equal("25-0001", valueIdentifier["value"]?.GetValue<string>());
+
+        // Assert coding.system/display match http://hl7.org/fhir/us/mdi/CodeSystem/cs-mdi-codes / MDI Case Number
+        Assert.Equal("http://hl7.org/fhir/us/mdi/CodeSystem/cs-mdi-codes", coding["system"]?.GetValue<string>());
+        Assert.Equal("MDI Case Number", coding["display"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public void MapsToxicologyResultsWithLessThanComparator()
+    {
+        ImportRecord record = new(ImportTemplateKind.Toxicology);
+        record.Fields["File Id"] = "tox-less-than";
+        record.Fields["MDI Case Number"] = "ME-1";
+        record.Fields["Decedent Name"] = "John Doe";
+        record.Fields["Date/Time of Issuance"] = "2024-01-22";
+
+        // Add one specimen row
+        record.Tables["Specimens"] = [new Dictionary<string, string?> { ["Name"] = "Blood" }];
+
+        // Add Results row with less than comparator
+        record.Tables["Results"] = [
+            new Dictionary<string, string?> {
+                ["Analyte/Analysis"] = "http://loinc.org^LP1^Fentanyl",
+                ["Method"] = "http://snomed.info/sct^123^Mass spectrometry",
+                ["Value"] = "<2.5 ng/mL"
+            }
+        ];
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+
+        // Find the Observation resource
+        JsonObject? observationEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Observation")?.AsObject();
+        Assert.NotNull(observationEntry);
+        JsonObject observation = observationEntry!["resource"]!.AsObject();
+
+        // Check valueString with less than comparator
+        Assert.Equal("<2.5 ng/mL", observation["valueString"]!.GetValue<string>());
+        Assert.Null(observation["valueQuantity"]);
+    }
+
+    [Fact]
+    public void MapsToxicologyLabReportCodeWithFullCodingStructure()
+    {
+        ImportRecord record = new(ImportTemplateKind.Toxicology);
+        record.Fields["File Id"] = "tox-code-1";
+        record.Fields["Decedent Name"] = "John Doe";
+        record.Fields["Lab Report Code"] = "LOINC^LP29684-5^Toxicology report";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        JsonObject? diagnosticReportEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "DiagnosticReport")?.AsObject();
+        Assert.NotNull(diagnosticReportEntry);
+        JsonObject diagnosticReport = diagnosticReportEntry!["resource"]!.AsObject();
+        Assert.NotNull(diagnosticReport["code"]!["coding"]?.AsArray()[0]);
+        JsonObject coding = diagnosticReport["code"]!["coding"]!.AsArray()[0]!.AsObject();
+        Assert.Equal(UriString.LOINC, coding["system"]?.GetValue<string>());
+        Assert.Equal("LP29684-5", coding["code"]?.GetValue<string>());
+        Assert.Equal("Toxicology report", coding["display"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public void MapsToxicologyLabReportCodeWithTextOnly()
+    {
+        ImportRecord record = new(ImportTemplateKind.Toxicology);
+        record.Fields["File Id"] = "tox-text-1";
+        record.Fields["Decedent Name"] = "Jane Doe";
+        record.Fields["Lab Report Code"] = "Toxicology report";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        JsonObject? diagnosticReportEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "DiagnosticReport")?.AsObject();
+        Assert.NotNull(diagnosticReportEntry);
+        JsonObject diagnosticReport = diagnosticReportEntry!["resource"]!.AsObject();
+        Assert.Equal("Toxicology report", diagnosticReport["code"]!["text"]?.GetValue<string>());
+        Assert.Null(diagnosticReport["code"]!["coding"]);
+    }
+
+    [Fact]
+    public void MapsPerformerAndLaboratoryToDiagnosticReport()
+    {
+        ImportRecord record = new(ImportTemplateKind.Toxicology);
+        record.Fields["File Id"] = "tox-performer-lab-1";
+        record.Fields["Decedent Name"] = "Jane Doe";
+        record.Fields["Performer"] = "Ruben C. Sutton";
+        record.Fields["Performer ID"] = "1234567890";
+        record.Fields["Performer ID System"] = "NPI";
+        record.Fields["Toxicology Lab Name"] = "State Forensic Laboratory";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        JsonObject? diagnosticReportEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "DiagnosticReport")?.AsObject();
+        Assert.NotNull(diagnosticReportEntry);
+        JsonObject diagnosticReport = diagnosticReportEntry!["resource"]!.AsObject();
+
+        // Assert performer contains only a Practitioner reference (no Organization reference)
+        JsonArray performerReferences = diagnosticReport["performer"]!.AsArray();
+        Assert.Single(performerReferences);
+        string performerReference = performerReferences[0]!["reference"]?.GetValue<string>()!;
+        Assert.True(performerReference.StartsWith("Practitioner/"), $"Performer should reference a Practitioner, not an Organization: {performerReference}");
+
+        // Assert resultsInterpreter contains an Organization reference
+        JsonArray resultsInterpreterReferences = diagnosticReport["resultsInterpreter"]!.AsArray();
+        Assert.Single(resultsInterpreterReferences);
+        string resultsInterpreterReference = resultsInterpreterReferences[0]!["reference"]?.GetValue<string>()!;
+        Assert.True(
+            resultsInterpreterReference.StartsWith("Organization/", StringComparison.Ordinal) ||
+            resultsInterpreterReference.StartsWith("urn:uuid:organization-", StringComparison.Ordinal),
+            $"Results interpreter should reference an Organization: {resultsInterpreterReference}");
+
+        // Find the Practitioner resource in the bundle and assert its identifier
+        JsonObject? practitionerEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Practitioner")?.AsObject();
+        Assert.NotNull(practitionerEntry);
+        JsonObject practitioner = practitionerEntry!["resource"]!.AsObject();
+        JsonArray practitionerIdentifiers = practitioner["identifier"]!.AsArray();
+        Assert.NotEmpty(practitionerIdentifiers);
+        JsonObject practitionerIdentifier = practitionerIdentifiers[0]!.AsObject();
+        Assert.Equal("1234567890", practitionerIdentifier["value"]?.GetValue<string>());
+        Assert.Equal("http://hl7.org/fhir/sid/us-npi", practitionerIdentifier["system"]?.GetValue<string>());
     }
 
     [Fact]

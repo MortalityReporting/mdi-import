@@ -162,21 +162,77 @@ public sealed class MdiFhirMapper
         Patient patient = CreatePatient(record, $"patient-{id}");
         Practitioner performer = VrdrCertifier.Create();
         performer.Id = $"practitioner-{id}";
-        performer.Name = [new HumanName { Family = record.Get("Performer") ?? "Unknown" }];
+        (List<string> performerGiven, string? performerFamily) = SplitName(record.Get("Performer") ?? "Unknown");
+        performer.Name = [new HumanName { Family = performerFamily, GivenElement = performerGiven.Select(value => new FhirString(value)).ToList() }];
         Organization? laboratory = CreateLaboratory(record, $"organization-{id}");
+        if (laboratory is not null) Record.GetResources()[laboratory.AsReference().Reference] = laboratory;
 
         DiagnosticReport report = DiagnosticReportToxicologyLabResultToMdi.Create(patient);
         report.Id = $"diagnostic-report-{id}";
         report.Status = DiagnosticReport.DiagnosticReportStatus.Final;
+
+        if (record.Get("Performer ID") is { } performerId && !string.IsNullOrWhiteSpace(performerId))
+        {
+            string? performerSystem = IdentifierSystem(record.Get("Performer System", "Performer ID System"));
+            performer.Identifier.Add(new Identifier
+            {
+                Use = Identifier.IdentifierUse.Usual,
+                System = performerSystem,
+                Value = performerId
+            });
+        }
+
         report.DiagnosticReportToxicologyLabResultToMdi().AddPerformer(performer);
-        if (laboratory is not null) report.DiagnosticReportToxicologyLabResultToMdi().AddPerformer(laboratory);
-        report.DiagnosticReportToxicologyLabResultToMdi().MdiCaseNumber = ("urn:mdi:case", record.Get("MDI Case Number") ?? id);
+        if (laboratory is not null)
+        {
+            string laboratoryReference = laboratory.AsReference().Reference;
+            report.DiagnosticReportToxicologyLabResultToMdi().AddPerformer(laboratory);
+            report.Performer.RemoveAll(reference => reference.Reference == laboratoryReference);
+            report.ResultsInterpreter = [laboratory.AsReference()];
+        }
+        string caseSystem = record.Get("MDI Case System") ?? "urn:mdi:case";
         if (record.Get("Laboratory Case Number") is { } laboratoryCase)
             report.DiagnosticReportToxicologyLabResultToMdi().ToxLabCaseNumber = ("urn:mdi:tox-lab-case", laboratoryCase);
+        SetMdiCaseNumber(report, caseSystem, record.Get("MDI Case Number") ?? id);
+        if (DateTimeValueFromText(record.Get("Date/Time of Receipt")) is { } receiptDate)
+            report.Effective = new FhirDateTime(receiptDate);
+        if (InstantValueFromText(record.Get("Date/Time of Issuance")) is { } issuance)
+            report.IssuedElement = issuance;
+        else if (InstantValueFromText(record.Get("Date of Report Issuance")) is { } legacyIssuance)
+            report.IssuedElement = legacyIssuance;
         string[] notes = (record.Tables.GetValueOrDefault("Notes") ?? [])
             .Select(row => row.GetValueOrDefault("Note Content"))
             .Where(value => !string.IsNullOrWhiteSpace(value)).Cast<string>().ToArray();
+        string? caseNotes = record.Get("ME/C Case Notes");
+        if (!string.IsNullOrWhiteSpace(caseNotes)) notes = [.. notes, caseNotes];
         if (notes.Length > 0) report.Conclusion = string.Join(Environment.NewLine, notes);
+
+        // Handle Lab Report Code mapping
+        string? labReportCode = record.Get("Lab Report Code");
+        if (!string.IsNullOrWhiteSpace(labReportCode))
+        {
+            string trimmedCode = labReportCode.Trim();
+            if (trimmedCode.Contains('^'))
+            {
+                string[] segments = trimmedCode.Split('^');
+                report.Code = new CodeableConcept
+                {
+                    Coding = new List<Coding>
+                    {
+                        new Coding
+                        {
+                            System = FhirCodingSystemUri(segments[0]),
+                            Code = segments[1].Trim(),
+                            Display = segments.Length > 2 ? string.Join("^", segments.Skip(2).Select(s => s.Trim())) : null
+                        }
+                    }
+                };
+            }
+            else
+            {
+                report.Code = new CodeableConcept { Text = trimmedCode };
+            }
+        }
 
         Dictionary<string, Specimen> specimens = new(StringComparer.OrdinalIgnoreCase);
         List<Dictionary<string, string?>> specimenRows = record.Tables.GetValueOrDefault("Specimens") ?? [];
@@ -186,6 +242,25 @@ public sealed class MdiFhirMapper
             string name = row.GetValueOrDefault("Name") ?? "Specimen";
             Specimen specimen = SpecimenToxicologyLab.Create(name, patient);
             specimen.Id = $"specimen-{id}-{StableToken($"specimen|{rowIndex}|{CanonicalRow(row)}", 12)}";
+            if (row.GetValueOrDefault("Identifier") is { } specimenIdentifier)
+                specimen.Identifier.Add(new Identifier("urn:mdi:specimen", specimenIdentifier.Trim()));
+            Specimen.CollectionComponent collection = specimen.Collection ??= new Specimen.CollectionComponent();
+            if (row.GetValueOrDefault("Body Site") is { } bodySite)
+                collection.BodySite = new CodeableConcept { Text = bodySite };
+            if (ParseQuantity(row.GetValueOrDefault("Amount")) is { } amount)
+                collection.Quantity = amount;
+            string? collected = row.GetValueOrDefault("Date/Time Collected") ?? record.Get("Date/Time of Specimen Collection");
+            if (DateTimeValueFromText(collected) is { } collectedDateTime)
+                collection.Collected = new FhirDateTime(collectedDateTime);
+            string? received = row.GetValueOrDefault("Date/Time of Receipt") ?? record.Get("Date/Time of Receipt");
+            if (DateTimeValueFromText(received) is { } receivedDateTime)
+                specimen.ReceivedTimeElement = new FhirDateTime(receivedDateTime);
+            if (row.GetValueOrDefault("Condition") is { } condition)
+                specimen.Condition.Add(new CodeableConcept { Text = condition });
+            if (row.GetValueOrDefault("Container") is { } container)
+                specimen.Container.Add(new Specimen.ContainerComponent { Description = container });
+            if (row.GetValueOrDefault("Notes") is { } specimenNotes)
+                specimen.Note.Add(new Annotation { Text = specimenNotes });
             report.DiagnosticReportToxicologyLabResultToMdi().AddSpecimen(specimen);
             specimens[name.Trim()] = specimen;
         }
@@ -193,18 +268,35 @@ public sealed class MdiFhirMapper
         for (int rowIndex = 0; rowIndex < resultRows.Count; rowIndex++)
         {
             Dictionary<string, string?> row = resultRows[rowIndex];
-            string analyte = row.GetValueOrDefault("Analyte/Analysis") ?? "Toxicology result";
+            string? analyteValue = row.GetValueOrDefault("Analyte/Analysis");
+            bool hasAnalyte = !string.IsNullOrWhiteSpace(analyteValue);
+            string analyte = hasAnalyte ? analyteValue!.Trim() : "Toxicology result";
             Observation result = ObservationToxicologyLabResult.Create(ObservationStatus.Final, analyte, patient);
             result.Id = $"observation-{id}-{StableToken($"result|{rowIndex}|{CanonicalRow(row)}", 12)}";
-            result.ObservationToxicologyLabResult().ValueText = row.GetValueOrDefault("Value") ?? "";
+            if (DateTimeValueFromText(record.Get("Date of Report Issuance", "Date/Time of Issuance")) is { } resultDate)
+                result.Effective = new FhirDateTime(resultDate);
+            result.Code = CodeableConceptFromValue(analyte);
+            string? resultValue = row.GetValueOrDefault("Value")?.Trim();
+            if (string.IsNullOrWhiteSpace(resultValue) && hasAnalyte)
+                result.ObservationToxicologyLabResult().ValueText = "Not Applicable";
+            else
+                result.ObservationToxicologyLabResult().ValueText = resultValue ?? "";
             if (row.GetValueOrDefault("Specimen") is { } specimenName && specimens.TryGetValue(specimenName.Trim(), out Specimen? specimen))
                 result.ObservationToxicologyLabResult().Specimen = specimen;
+            if (row.GetValueOrDefault("Method") is { } method && !string.IsNullOrWhiteSpace(method))
+                result.Method = CodeableConceptFromValue(method);
+            if (row.GetValueOrDefault("Description") is { } description)
+                result.Note.Add(new Annotation { Text = description });
+            Quantity? rangeLow = ParseQuantity(row.GetValueOrDefault("Range Low"));
+            Quantity? rangeHigh = ParseQuantity(row.GetValueOrDefault("Range High"));
+            if (rangeLow is not null || rangeHigh is not null)
+                result.ReferenceRange.Add(new Observation.ReferenceRangeComponent { Low = rangeLow, High = rangeHigh });
             report.DiagnosticReportToxicologyLabResultToMdi().AddResult(result);
         }
 
         MessageHeader header = MessageHeaderToxicologyToMdi.Create("urn:mdi:import", report);
         header.Id = $"message-header-{id}";
-        Bundle bundle = BundleMessageToxicologyToMdi.Create(new Identifier("urn:mdi:case", caseKey), header);
+        Bundle bundle = BundleMessageToxicologyToMdi.Create(new Identifier(caseSystem, caseKey), header);
         bundle.Id = $"bundle-tox-{id}";
         bundle.TimestampElement = Instant.Now();
         return bundle;
@@ -349,6 +441,15 @@ public sealed class MdiFhirMapper
             patient.Identifier.Add(new Identifier("urn:mdi:mrn", mrn) { Use = Identifier.IdentifierUse.Usual, Type = CodedConcept("http://terminology.hl7.org/CodeSystem/v2-0203", "MR", "Medical record number") });
         if (record.Get("POSSIBLEID", "Possible ID") is { } possibleId)
             patient.Identifier.Add(new Identifier("urn:mdi:possible-id", possibleId) { Use = Identifier.IdentifierUse.Usual, Type = CodedConcept("http://terminology.hl7.org/CodeSystem/v2-0203", "PI", "Patient internal identifier") });
+        if (record.Get("Decedent ID") is { } decedentId)
+        {
+            patient.Identifier.Add(new Identifier
+            {
+                Use = Identifier.IdentifierUse.Usual,
+                System = IdentifierSystem(record.Get("Decedent ID System")),
+                Value = decedentId
+            });
+        }
         if (patient.Identifier.Count == 0)
         {
             Identifier absentIdentifier = new();
@@ -671,6 +772,8 @@ public sealed class MdiFhirMapper
             case "AUTOPSYLOCATION": names.Add($"Autopsy Performed Location: {part}"); break;
             case "Funeral Home Address": names.Add($"Funeral Home: {part}"); break;
         }
+        if (part == "State, U.S. Territory or Canadian Province") names.Add($"{prefix}: State");
+        if (part == "Postal Code") names.Add($"{prefix}: Zip");
         return GetExactValue(record, names.ToArray());
     }
 
@@ -689,9 +792,107 @@ public sealed class MdiFhirMapper
         string? full = record.Get("Decedent Name");
         if (first is null && last is null && full is not null)
         {
-            string[] parts = full.Split(' ', StringSplitOptions.RemoveEmptyEntries); first = parts.FirstOrDefault(); last = parts.Length > 1 ? parts[^1] : null; middle = parts.Length > 2 ? string.Join(' ', parts[1..^1]) : null;
+            (List<string> given, string? family) = SplitName(full);
+            return (given, family);
         }
         return (new[] { first, middle }.Where(value => value is not null).Cast<string>().ToList(), last);
+    }
+
+    private static (List<string> Given, string? Family) SplitName(string value)
+    {
+        string[] parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return (parts.Length > 1 ? parts[..^1].ToList() : [], parts.Length > 0 ? parts[^1] : null);
+    }
+
+    private static Quantity? ParseQuantity(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        string input = value.Trim();
+        Quantity.QuantityComparator? comparator = null;
+        string? comparatorText = input switch
+        {
+            ['<', '=', ..] => "<=",
+            ['>', '=', ..] => ">=",
+            ['<', ..] => "<",
+            ['>', ..] => ">",
+            _ => null
+        };
+        if (comparatorText is not null)
+        {
+            input = input[comparatorText.Length..].TrimStart();
+            comparator = comparatorText switch
+            {
+                "<" => Quantity.QuantityComparator.LessThan,
+                ">" => Quantity.QuantityComparator.GreaterThan,
+                "<=" => Quantity.QuantityComparator.LessOrEqual,
+                ">=" => Quantity.QuantityComparator.GreaterOrEqual,
+                _ => null
+            };
+        }
+        string[] parts = input.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        if (!decimal.TryParse(parts[0], NumberStyles.Number, CultureInfo.InvariantCulture, out decimal amount)) return null;
+        string? unit = parts.Length > 1 ? parts[1].Trim() : null;
+        return new Quantity(amount, unit ?? "") { System = "http://unitsofmeasure.org", Code = unit, Comparator = comparator };
+    }
+
+    private static CodeableConcept CodeableConceptFromValue(string value)
+    {
+        string trimmed = value.Trim();
+        if (!trimmed.Contains('^')) return new CodeableConcept { Text = trimmed };
+        string[] segments = trimmed.Split('^');
+        return new CodeableConcept
+        {
+            Coding = [new Coding
+            {
+                System = FhirCodingSystemUri(segments[0]),
+                Code = segments[1].Trim(),
+                Display = segments.Length > 2 ? string.Join("^", segments.Skip(2).Select(segment => segment.Trim())) : null
+            }]
+        };
+    }
+
+    private static string? DateTimeValueFromText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out DateTimeOffset offset))
+            return offset.ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture);
+        if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out DateTime local))
+            return local.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture);
+        return null;
+    }
+
+    private static Instant? InstantValueFromText(string? value)
+    {
+        string? dateTime = DateTimeValueFromText(value);
+        return dateTime is not null && DateTimeOffset.TryParse(dateTime, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out DateTimeOffset offset)
+            ? new Instant(offset)
+            : null;
+    }
+
+    private static string FhirCodingSystemUri(string value)
+    {
+        string system = value.Trim();
+        string normalized = ImportRecord.Normalize(system);
+        return normalized switch
+        {
+            "loinc" => UriString.LOINC,
+            "sct" or "snomed" or "snomedct" => UriString.SCT,
+            "ucum" or "unitsofmeasure" => UriString.UnitsOfMeasure,
+            "ssn" or "usssn" => UriString.UsSsnUri,
+            _ when Uri.TryCreate(system, UriKind.Absolute, out _) => system,
+            _ => throw new FormatException($"Lab Report Code system '{system}' must be a FHIR URI.")
+        };
+    }
+
+    private static void SetMdiCaseNumber(DiagnosticReport report, string system, string value)
+    {
+        Identifier identifier = new(system, value)
+        {
+            Type = (CodeableConcept)VsTrackingNumberType.MdiCaseNumber.DeepCopy()
+        };
+        report.Extension.Add(new Extension(
+            "http://hl7.org/fhir/us/mdi/StructureDefinition/Extension-tracking-number",
+            identifier));
     }
 
     private static (List<Resource>, Narrative?, CodeableConcept?) SectionValue(List<Resource> resources) =>

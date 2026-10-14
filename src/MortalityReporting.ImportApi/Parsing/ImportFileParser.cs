@@ -162,31 +162,70 @@ public sealed class ImportFileParser
     {
         ImportRecord record = new(ImportTemplateKind.Toxicology);
         string? activeTable = null;
-        List<string> tableHeaders = [];
+        List<(int Index, string Name)> tableColumns = [];
+        bool awaitingTableHeaders = false;
         int pendingLabelRow = -1;
         for (int rowIndex = 0; rowIndex < rows.Count; rowIndex++)
         {
             List<string?> row = rows[rowIndex];
             string? first = Get(row, 0);
-            if (ImportRecord.Normalize(first ?? "") is "specimens" or "results" or "notes")
+            string normalizedFirst = ImportRecord.Normalize(first ?? "");
+
+            if (normalizedFirst is "specimens" or "results" or "notes")
             {
-                activeTable = first!.Trim();
-                tableHeaders = row.Skip(1).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!.Trim()).ToList();
+                activeTable = normalizedFirst switch
+                {
+                    "specimens" => "Specimens",
+                    "results" => "Results",
+                    _ => "Notes"
+                };
+                tableColumns = GetTableColumns(row, 1);
+                awaitingTableHeaders = tableColumns.Count == 0;
                 record.Tables.TryAdd(activeTable, []);
                 continue;
             }
-            if (activeTable is not null && string.IsNullOrWhiteSpace(first) && tableHeaders.Count > 0)
+
+            // The redesigned template uses a "General Comments" row whose
+            // second cell is the Notes table header, followed by rows with
+            // the note text in column B.
+            if (normalizedFirst == "generalcomments")
             {
-                Dictionary<string, string?> tableRow = new(StringComparer.OrdinalIgnoreCase);
-                for (int index = 0; index < tableHeaders.Count; index++)
-                {
-                    tableRow[tableHeaders[index]] = Get(row, index + 1);
-                    record.ExpectedFields.Add($"{activeTable}[{record.Tables[activeTable].Count}].{tableHeaders[index]}");
-                }
-                if (tableRow.Values.Any(value => !string.IsNullOrWhiteSpace(value))) record.Tables[activeTable].Add(tableRow);
+                activeTable = "Notes";
+                tableColumns = GetTableColumns(row, 1);
+                if (tableColumns.Count == 0) tableColumns.Add((1, "Note Content"));
+                awaitingTableHeaders = false;
+                record.Tables.TryAdd(activeTable, []);
                 continue;
             }
-            if (!string.IsNullOrWhiteSpace(first) && ImportRecord.Normalize(first) is "results" or "notes") { activeTable = null; }
+
+            if (activeTable is not null && awaitingTableHeaders)
+            {
+                tableColumns = GetTableColumns(row, 0);
+                awaitingTableHeaders = false;
+                continue;
+            }
+
+            if (activeTable is not null && tableColumns.Count > 0)
+            {
+                if (IsToxicologySectionBoundary(normalizedFirst))
+                {
+                    activeTable = null;
+                    tableColumns = [];
+                    awaitingTableHeaders = false;
+                }
+                else
+                {
+                    Dictionary<string, string?> tableRow = new(StringComparer.OrdinalIgnoreCase);
+                    foreach ((int index, string name) in tableColumns)
+                    {
+                        tableRow[name] = Get(row, index);
+                        record.ExpectedFields.Add($"{activeTable}[{record.Tables[activeTable].Count}].{name}");
+                    }
+                    if (tableRow.Values.Any(value => !string.IsNullOrWhiteSpace(value))) record.Tables[activeTable].Add(tableRow);
+                    continue;
+                }
+            }
+
             if (pendingLabelRow >= 0 && !string.IsNullOrWhiteSpace(first))
             {
                 record.ExpectedFields.Add("File Id");
@@ -194,20 +233,36 @@ public sealed class ImportFileParser
                 pendingLabelRow = -1;
                 continue;
             }
-            string normalizedFirst = ImportRecord.Normalize(first ?? "");
-            bool isSection = normalizedFirst is "laboratory" or "decedent" or "generalcomments" or "agencyname";
-            if (!string.IsNullOrWhiteSpace(first) && !isSection)
-            {
-                record.ExpectedFields.Add(first.Trim());
-                record.Fields[first.Trim()] = Get(row, 1);
-            }
+
+            if (string.IsNullOrWhiteSpace(first)) continue;
+            if (normalizedFirst is "laboratory" or "decedent" or "agencyname") continue;
+
             if (normalizedFirst == "fileid")
             {
-                pendingLabelRow = rowIndex;
+                record.ExpectedFields.Add("File Id");
+                string? fileId = Get(row, 1);
+                if (!string.IsNullOrWhiteSpace(fileId)) record.Fields["File Id"] = fileId.Trim();
+                else pendingLabelRow = rowIndex;
+                continue;
             }
+
+            record.ExpectedFields.Add(first.Trim());
+            record.Fields[first.Trim()] = Get(row, 1);
         }
         return record;
     }
+
+    private static List<(int Index, string Name)> GetTableColumns(List<string?> row, int minimumIndex)
+    {
+        return row
+            .Select((value, index) => (value, index))
+            .Where(item => item.index >= minimumIndex && !string.IsNullOrWhiteSpace(item.value))
+            .Select(item => (item.index, item.value!.Trim()))
+            .ToList();
+    }
+
+    private static bool IsToxicologySectionBoundary(string normalizedFirst) =>
+        normalizedFirst is "specimens" or "results" or "notes" or "generalcomments" or "laboratory" or "decedent" or "agencyname" or "fileid";
 
     private static void MergeSchemaRecords(List<ImportRecord> destination, List<ImportRecord> source)
     {

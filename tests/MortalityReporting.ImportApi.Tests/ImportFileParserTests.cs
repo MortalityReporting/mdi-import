@@ -348,18 +348,21 @@ public sealed class ImportFileParserTests
         Assert.Single(records);
         ImportRecord record = records[0];
         Assert.Equal(ImportTemplateKind.Toxicology, record.Kind);
-        Assert.False(string.IsNullOrWhiteSpace(record.Get("File Id")));
-        Assert.False(string.IsNullOrWhiteSpace(record.Get("Decedent Name")));
-        Assert.NotEmpty(record.Tables["Specimens"]);
-        Assert.NotEmpty(record.Tables["Results"]);
+        Assert.Equal("MDI-DEV-GOLDENSET", record.Get("File Id"));
+        Assert.Equal("Han Solo", record.Get("Decedent Name"));
+        Assert.Equal(6, record.Tables["Specimens"].Count);
+        Assert.Equal(13, record.Tables["Results"].Count);
+        Assert.Single(record.Tables["Notes"]);
+        Assert.StartsWith("It may be appropriate", record.Tables["Notes"][0]["Note Content"]);
+        Assert.DoesNotContain(record.Tables["Results"], row => row.Values.Any(value => value?.StartsWith("It may be appropriate", StringComparison.Ordinal) == true));
 
         JsonObject bundle = new MdiFhirMapper().Map(record);
         Assert.NotNull(bundle["entry"]);
-        
+
         HashSet<string> resourceTypes = new();
-        if (bundle["entry"] is JsonArray entries)
+        if (bundle["entry"] is JsonArray resourceEntries)
         {
-            foreach (JsonNode? entry in entries)
+            foreach (JsonNode? entry in resourceEntries)
             {
                 if (entry is JsonObject entryObj && entryObj["resource"] is JsonObject resource)
                 {
@@ -367,10 +370,33 @@ public sealed class ImportFileParserTests
                 }
             }
         }
-        
+
         Assert.Contains("DiagnosticReport", resourceTypes);
         Assert.Contains("Observation", resourceTypes);
         Assert.Contains("Organization", resourceTypes);
+
+        JsonArray entries = bundle["entry"]!.AsArray();
+        IEnumerable<JsonObject> entryObjects = entries.Select(entry => entry!.AsObject());
+        JsonObject patient = entryObjects
+            .First(entry => entry["resource"]!["resourceType"]?.GetValue<string>() == "Patient")["resource"]!.AsObject();
+        Assert.Equal("123-45-6789", patient["identifier"]![0]!["value"]!.GetValue<string>());
+        Assert.Equal("http://hl7.org/fhir/sid/us-ssn", patient["identifier"]![0]!["system"]!.GetValue<string>());
+
+        JsonObject report = entryObjects
+            .First(entry => entry["resource"]!["resourceType"]?.GetValue<string>() == "DiagnosticReport")["resource"]!.AsObject();
+        Assert.Contains("It may be appropriate", report["conclusion"]!.GetValue<string>());
+
+        JsonObject organization = entryObjects
+            .First(entry => entry["resource"]!["resourceType"]?.GetValue<string>() == "Organization")["resource"]!.AsObject();
+        JsonObject address = organization["address"]!.AsArray()[0]!.AsObject();
+        Assert.Equal("FL", address["state"]!.GetValue<string>());
+        Assert.Equal("32608", address["postalCode"]!.GetValue<string>());
+
+        JsonObject specimen = entryObjects
+            .First(entry => entry["resource"]!["resourceType"]?.GetValue<string>() == "Specimen")["resource"]!.AsObject();
+        Assert.Equal("X353256", specimen["identifier"]![0]!["value"]!.GetValue<string>());
+        Assert.Equal("femoral vein structure (body structure)", specimen["collection"]!["bodySite"]!["text"]!.GetValue<string>());
+        Assert.Equal(20, specimen["collection"]!["quantity"]!["value"]!.GetValue<decimal>());
     }
 
     private static string? FindRepositoryFixture(string fileName)
