@@ -179,3 +179,14 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# .NET build output
+**/bin/
+**/obj/
+
+# macOS metadata
+.DS_Store
+
+# Local API response captures may contain sensitive data
+tests/*-response.json
+tests/MDI-To-EDRS-HanSolo.xlsx
