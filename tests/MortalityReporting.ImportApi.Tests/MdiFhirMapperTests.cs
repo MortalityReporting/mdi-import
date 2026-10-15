@@ -645,6 +645,70 @@ public sealed class MdiFhirMapperTests
     }
 
     [Fact]
+    public void MapsDcrFuneralDirectorToPractitionerWithContactInfo()
+    {
+        ImportRecord record = new(ImportTemplateKind.Dcr);
+        record.Fields["BASEFHIRID"] = "dcr-director";
+        record.Fields["Funeral Home: Director Name"] = "Alex Director";
+        record.Fields["Funeral Home: Name"] = "Director Funeral Home";
+        record.Fields["Funeral Home: Street"] = "10 Main Street";
+        record.Fields["Funeral Home: City"] = "Atlanta";
+        record.Fields["Funeral Home: State, U.S. Territory or Canadian Province"] = "GA";
+        record.Fields["Funeral Home: Postal Code"] = "30303";
+        record.Fields["Funeral Home: Phone"] = "555-0100";
+        record.Fields["Funeral Home: Fax"] = "555-0101";
+        record.SignatureData = [1, 2, 3];
+        record.SignatureContentType = "image/jpeg";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+
+        // Find the nested document Bundle and Composition
+        JsonObject? documentBundle = FindResourceInBundle(bundle, "Bundle");
+        Assert.NotNull(documentBundle);
+
+        // Find the Composition in the document bundle
+        JsonObject? composition = FindResourceInBundle(documentBundle!, "Composition");
+        Assert.NotNull(composition);
+
+        // Assert Composition.author references a Practitioner whose name contains Alex Director
+        string? authorReference = composition!["author"]?[0]!["reference"]?.GetValue<string>();
+        Assert.NotNull(authorReference);
+        Assert.True(authorReference.StartsWith("Practitioner/"), $"Author should reference a Practitioner: {authorReference}");
+
+        // Find the Practitioner resource in the document bundle
+        JsonObject? practitionerEntry = documentBundle!["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Practitioner" &&
+                entry!["resource"]!["id"]?.GetValue<string>()?.Contains("funeral-home-director") == true)?.AsObject();
+        Assert.NotNull(practitionerEntry);
+        JsonObject practitioner = practitionerEntry!["resource"]!.AsObject();
+
+        // Assert the Practitioner name contains "Alex Director" using serialized JSON assertions
+        string practitionerJson = JsonSerializer.Serialize(practitioner);
+        Assert.Contains("Director", practitionerJson); // Family name
+        Assert.Contains("\"Alex\"", practitionerJson); // Given name
+
+        // Assert that Practitioner has address and work phone/fax using serialized JSON assertions
+        Assert.Contains("10 Main Street", practitionerJson);
+        Assert.Contains("Atlanta", practitionerJson);
+        Assert.Contains("GA", practitionerJson);
+        Assert.Contains("30303", practitionerJson);
+        Assert.Contains("555-0100", practitionerJson);
+        Assert.Contains("555-0101", practitionerJson);
+
+        // Assert nested Bundle.signature.who.reference equals the Composition.author reference
+        JsonObject? signature = documentBundle!["signature"]?.AsObject();
+        Assert.NotNull(signature);
+        string? signatureWhoReference = signature!["who"]!["reference"]?.GetValue<string>();
+        Assert.NotNull(signatureWhoReference);
+        Assert.Equal(authorReference, signatureWhoReference);
+
+        // Assert an Organization resource still exists using serialized JSON assertions
+        string documentBundleJson = JsonSerializer.Serialize(documentBundle);
+        Assert.Contains("Director Funeral Home", documentBundleJson);
+        Assert.Contains("Organization", documentBundleJson);
+    }
+
+    [Fact]
     public void MapsDcrRecordWithNoBundleDuplication()
     {
         ImportRecord record = new(ImportTemplateKind.Dcr);

@@ -310,6 +310,7 @@ public sealed class MdiFhirMapper
         Patient patient = CreatePatient(record, $"patient-{id}");
         Practitioner practitioner = CreatePractitioner(record, $"practitioner-{id}");
         Practitioner? submitter = CreateSubmitter(record, $"practitioner-{id}-submitter");
+        Practitioner? funeralDirector = CreateFuneralHomeDirector(record, $"practitioner-{id}-funeral-home-director");
         Organization? funeralHome = CreateFuneralHome(record, $"organization-{id}-funeral-home");
         List<Observation> causes = [];
         AddCause(record, causes, patient, practitioner, 1, "CAUSEA", "Cause of Death Part I Line a", "DURATIONA", "Cause of Death Part I Interval, Line a");
@@ -327,7 +328,7 @@ public sealed class MdiFhirMapper
         Location? autopsyLocation = CreateAutopsyLocation(record, id);
 
         Composition composition = CompositionMdiDcr.Create(
-            new Identifier("urn:mdi:case", caseKey), CompositionStatus.Preliminary, patient, submitter ?? practitioner);
+            new Identifier("urn:mdi:case", caseKey), CompositionStatus.Preliminary, patient, funeralDirector ?? submitter ?? practitioner);
         composition.Id = $"composition-{id}";
         if (record.Get("MDICASEID", "Tracking Number: Mdi Case Number") is { } mdiCase)
             composition.CompositionMdiDcr().MdiCaseNumber = ("urn:mdi:case", mdiCase);
@@ -361,7 +362,7 @@ public sealed class MdiFhirMapper
 
         Bundle document = BundleDocumentMdiDcr.Create(new Identifier("urn:ietf:rfc:3986", $"urn:uuid:{DeterministicUuid($"dcr-document|{id}")}"), composition);
         document.Id = $"bundle-document-dcr-{id}";
-        List<Resource?> dcrResources = [patient, practitioner, submitter, funeralHome, deathDate, manner, injury, disposition, certification, deathLocation, injuryLocation];
+        List<Resource?> dcrResources = [patient, practitioner, submitter, funeralDirector, funeralHome, deathDate, manner, injury, disposition, certification, deathLocation, injuryLocation];
         dcrResources.AddRange(causes);
         AppendResources(document, dcrResources);
         CodeableConcept reason = DcrReason(record.Get("Message Reason"));
@@ -380,11 +381,16 @@ public sealed class MdiFhirMapper
             .Select(entry => entry?["resource"]?.AsObject())
             .FirstOrDefault(resource => resource?["resourceType"]?.GetValue<string>() == "Bundle" &&
                 resource["meta"]?["profile"]?.AsArray().Any(profile => profile?.GetValue<string>()?.EndsWith("Bundle-document-mdi-dcr", StringComparison.Ordinal) == true) == true);
+        JsonObject? director = document?["entry"]?.AsArray()
+            .Select(entry => entry?["resource"]?.AsObject())
+            .FirstOrDefault(resource => resource?["resourceType"]?.GetValue<string>() == "Practitioner" &&
+                resource["id"]?.GetValue<string>()?.EndsWith("-funeral-home-director", StringComparison.Ordinal) == true);
         JsonObject? organization = document?["entry"]?.AsArray()
             .Select(entry => entry?["resource"]?.AsObject())
             .FirstOrDefault(resource => resource?["resourceType"]?.GetValue<string>() == "Organization");
-        string? organizationId = organization?["id"]?.GetValue<string>();
-        if (document is null || string.IsNullOrWhiteSpace(organizationId)) return;
+        string? signerType = director is not null ? "Practitioner" : organization is not null ? "Organization" : null;
+        string? signerId = director?["id"]?.GetValue<string>() ?? organization?["id"]?.GetValue<string>();
+        if (document is null || string.IsNullOrWhiteSpace(signerType) || string.IsNullOrWhiteSpace(signerId)) return;
         document["signature"] = new JsonObject
         {
             ["type"] = new JsonArray(new JsonObject
@@ -394,7 +400,7 @@ public sealed class MdiFhirMapper
                 ["display"] = "Author's Signature"
             }),
             ["when"] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
-            ["who"] = new JsonObject { ["reference"] = $"Organization/{organizationId}" },
+            ["who"] = new JsonObject { ["reference"] = $"{signerType}/{signerId}" },
             ["data"] = Convert.ToBase64String(record.SignatureData)
         };
     }
@@ -537,6 +543,26 @@ public sealed class MdiFhirMapper
         if (phone is not null) practitioner.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Phone, ContactPoint.ContactPointUse.Work, phone));
         if (email is not null) practitioner.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Email, ContactPoint.ContactPointUse.Work, email));
         if (fax is not null) practitioner.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Fax, ContactPoint.ContactPointUse.Work, fax));
+        return practitioner;
+    }
+
+    private static Practitioner? CreateFuneralHomeDirector(ImportRecord record, string id)
+    {
+        string? name = GetExactValue(record, "Funeral Home: Director Name", "Funeral Home Director Name");
+        if (name is null) return null;
+
+        Practitioner practitioner = PractitionerVr.Create();
+        practitioner.Id = id;
+        (List<string> given, string? family) = SplitName(name);
+        practitioner.Name = [new HumanName { Family = family, GivenElement = given.Select(value => new FhirString(value)).ToList() }];
+
+        if (BuildAddress(record, "Funeral Home Address", Address.AddressUse.Work) is { } address)
+            practitioner.Address = [address];
+        practitioner.Telecom = [];
+        if (GetExactValue(record, "Funeral Home: Phone", "FUNERAL_HOME_PHONE", "Funeral Home Phone Number") is { } phone)
+            practitioner.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Phone, ContactPoint.ContactPointUse.Work, phone));
+        if (GetExactValue(record, "Funeral Home: Fax", "FUNERAL_HOME_FAX", "Funeral Home Fax Number") is { } fax)
+            practitioner.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Fax, ContactPoint.ContactPointUse.Work, fax));
         return practitioner;
     }
 

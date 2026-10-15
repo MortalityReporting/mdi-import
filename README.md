@@ -138,6 +138,7 @@ dotnet test tests/MortalityReporting.ImportApi.Tests
 - Multipart file uploads require the field name `file`
 - Both incoming and outgoing requests require Basic authentication when credentials are configured
 - DCR submitter/contact data maps to a Practitioner and funeral-home data maps to an Organization.
+- DCR funeral-home director name, address, phone, and fax map to a Practitioner used as the nested DCR Composition author and signature signer when available.
 - DCR embedded funeral-home signature images map to `Bundle.signature` on the nested DCR document Bundle when a funeral-home Organization is available.
 - Toxicology laboratory metadata maps to an Organization and general comments map to `DiagnosticReport.conclusion`.
 - XLSX residence, death, injury, and autopsy address labels map to FHIR Address/Location resources; autopsy status maps to the VRDR autopsy indicator profile.
