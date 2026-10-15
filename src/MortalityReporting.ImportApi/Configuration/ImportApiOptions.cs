@@ -13,6 +13,7 @@ public sealed class ImportApiOptions
     public string FhirPassword { get; set; } = "";
     public long MaxFileSizeBytes { get; set; } = 50 * 1024 * 1024;
     public int FhirTimeoutSeconds { get; set; } = 30;
+    public string[] CorsAllowedOrigins { get; set; } = Array.Empty<string>();
 
     public void ApplyEnvironmentOverrides()
     {
@@ -25,6 +26,11 @@ public sealed class ImportApiOptions
         FhirPassword = EnvironmentValue("FHIR_API_PASSWORD") ?? FhirPassword;
         if (long.TryParse(Environment.GetEnvironmentVariable("MAX_FILE_SIZE_BYTES"), out long maxSize)) MaxFileSizeBytes = maxSize;
         if (int.TryParse(Environment.GetEnvironmentVariable("FHIR_TIMEOUT_SECONDS"), out int timeout)) FhirTimeoutSeconds = timeout;
+        string? corsAllowedOrigins = Environment.GetEnvironmentVariable("CORS_ALLOWED_ORIGINS");
+        if (!string.IsNullOrWhiteSpace(corsAllowedOrigins))
+        {
+            CorsAllowedOrigins = corsAllowedOrigins.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        }
     }
 
     private static string? EnvironmentValue(string name)

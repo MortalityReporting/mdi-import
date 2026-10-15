@@ -34,6 +34,7 @@ The API will start on the configured port (default: 5000 for HTTP, 5001 for HTTP
 | `FHIR_API_PASSWORD` | Password for Basic authentication on FHIR endpoint |
 | `FHIR_TIMEOUT_SECONDS` | Timeout for FHIR requests (default: 30) |
 | `MAX_FILE_SIZE_BYTES` | Maximum allowed file size (default: 50MB) |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the import endpoint (all origins are allowed when empty or unset) |
 
 ## Configuration Options
 
@@ -44,6 +45,7 @@ The API supports the following configurable options:
 - **Resource references**: Resource references use relative values such as `Patient/patient-123`; Bundle `fullUrl` values use the configured absolute `FHIR_FULL_URL_BASE`.
 - **Basic Authentication**: Required on both incoming requests and outgoing FHIR submissions
 - **File Upload Field**: Multipart field name is `file`
+- **CORS**: By default, all browser origins may call the import endpoint. To restrict access, configure `CORS_ALLOWED_ORIGINS` with exact origins such as `https://client.example.gov`. Origins must include the scheme and may include a port; paths and query strings are not supported. A trailing slash is normalized away. Multiple origins are comma-separated. CORS permits browser `POST` requests and request headers such as `Authorization` and `Content-Type`; it does not enable credentialed cookie requests.
 
 ## Supported File Formats
 
