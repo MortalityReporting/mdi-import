@@ -66,7 +66,8 @@ internal static class BasicAuthorization
 {
     public static bool IsValid(HttpRequest request, ImportApiOptions options)
     {
-        if (string.IsNullOrWhiteSpace(options.IncomingUsername) || string.IsNullOrWhiteSpace(options.IncomingPassword)) return false;
+        if (string.IsNullOrWhiteSpace(options.IncomingUsername)) return true;
+        if (string.IsNullOrWhiteSpace(options.IncomingPassword)) return false;
         string? header = request.Headers.Authorization.FirstOrDefault();
         if (header is null || !header.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase)) return false;
         try

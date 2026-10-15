@@ -26,8 +26,8 @@ The API will start on the configured port (default: 5000 for HTTP, 5001 for HTTP
 | Variable | Description |
 |----------|-------------|
 | `INCOMING_API_PATH` | Endpoint path for file uploads (default: `/import`) |
-| `INCOMING_API_USERNAME` | Username for Basic authentication on incoming requests |
-| `INCOMING_API_PASSWORD` | Password for Basic authentication on incoming requests |
+| `INCOMING_API_USERNAME` | Username for Basic authentication on incoming requests. When empty/unset, incoming API Basic authorization is disabled. When configured, password is required and all requests must authenticate. |
+| `INCOMING_API_PASSWORD` | Password for Basic authentication on incoming requests. Required when username is configured. |
 | `FHIR_API_ENDPOINT` | FHIR server endpoint URL for data submission |
 | `FHIR_FULL_URL_BASE` | Absolute base URI used for Bundle `fullUrl` values (default: `https://mdi.local/fhir`) |
 | `FHIR_API_USERNAME` | Username for Basic authentication on FHIR endpoint |
