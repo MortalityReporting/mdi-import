@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using GaTech.Chai.Mdi;
 using GaTech.Chai.Vrdr;
 using GaTech.Chai.Share;
 using MortalityReporting.ImportApi.Models;
@@ -486,6 +487,7 @@ public sealed class MdiFhirMapperTests
         record.Fields["Funeral Home: Phone"] = "555-0100";
         record.Fields["Funeral Home: Fax"] = "555-0101";
         record.Fields["Funeral Home: City"] = "Springfield";
+        record.Fields["CERTIFIER_NAME"] = "Dr. Certifier";
 
         JsonObject bundle = new MdiFhirMapper().Map(record);
         JsonObject? documentBundle = FindResourceInBundle(bundle, "Bundle");
@@ -512,6 +514,13 @@ public sealed class MdiFhirMapperTests
         Assert.NotNull(cremationSection!["entry"]);
         JsonArray? cremationEntries = cremationSection!["entry"]!.AsArray();
         Assert.NotEmpty(cremationEntries);
+
+        // Assert cremation section coding system/code match MdiCodeSystem.MdiCodes.CremationClearanceInfo
+        Assert.Equal(MdiCodeSystem.MdiCodes.CremationClearanceInfo.Coding[0].Code, cremationSection!["code"]!["coding"]![0]!["code"]?.GetValue<string>());
+        Assert.Equal(MdiCodeSystem.MdiCodes.CremationClearanceInfo.Coding[0].System, cremationSection!["code"]!["coding"]![0]!["system"]?.GetValue<string>());
+
+        Assert.Contains(cremationEntries, entry =>
+            entry?["reference"]?.GetValue<string>()?.StartsWith("Practitioner/", StringComparison.Ordinal) == true);
 
         JsonObject? organizationEntry = documentBundle!["entry"]!.AsArray()
             .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Organization")?.AsObject();
@@ -650,6 +659,8 @@ public sealed class MdiFhirMapperTests
         ImportRecord record = new(ImportTemplateKind.Dcr);
         record.Fields["BASEFHIRID"] = "dcr-director";
         record.Fields["Funeral Home: Director Name"] = "Alex Director";
+        record.Fields["Funeral Home: Director ID"] = "1234567890";
+        record.Fields["Funeral Home: Director ID System"] = "NPI";
         record.Fields["Funeral Home: Name"] = "Director Funeral Home";
         record.Fields["Funeral Home: Street"] = "10 Main Street";
         record.Fields["Funeral Home: City"] = "Atlanta";
@@ -694,6 +705,21 @@ public sealed class MdiFhirMapperTests
         Assert.Contains("30303", practitionerJson);
         Assert.Contains("555-0100", practitionerJson);
         Assert.Contains("555-0101", practitionerJson);
+
+        // Assert that Practitioner has identifier with NPI system and value
+        JsonArray? practitionerIdentifiers = practitioner["identifier"]?.AsArray();
+        Assert.NotNull(practitionerIdentifiers);
+        Assert.NotEmpty(practitionerIdentifiers);
+
+        // Check that an identifier with the correct system and value exists
+        bool hasDirectorIdentifier = ((IEnumerable<JsonNode?>)practitionerIdentifiers)
+            .Any(identifierNode =>
+            {
+                JsonObject identifierObj = ((JsonObject)identifierNode!);
+                return identifierObj["system"]?.GetValue<string>() == "http://hl7.org/fhir/sid/us-npi" &&
+                       identifierObj["value"]?.GetValue<string>() == "1234567890";
+            });
+        Assert.True(hasDirectorIdentifier, "No identifier found with system 'http://hl7.org/fhir/sid/us-npi' and value '1234567890'");
 
         // Assert nested Bundle.signature.who.reference equals the Composition.author reference
         JsonObject? signature = documentBundle!["signature"]?.AsObject();

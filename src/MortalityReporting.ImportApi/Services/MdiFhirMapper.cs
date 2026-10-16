@@ -352,6 +352,7 @@ public sealed class MdiFhirMapper
         List<Resource> dispositionResources = Resources(disposition, hasLegacyFuneralHomeData ? funeralHome : null);
         if (dispositionResources.Count > 0) dcrComposition.DecedentDisposition = (dispositionResources, null);
         List<Resource> cremationResources = Resources(hasNewCremationData ? funeralHome : null);
+        if (HasImportedCertifierData(record)) cremationResources.Add(practitioner);
         if (cremationResources.Count > 0) dcrComposition.CremationClearanceInfo = (cremationResources, null);
         RemoveDcrSectionIfEmpty(composition, "DecedentDemographics", demographicResources.Count == 0);
         RemoveDcrSectionIfEmpty(composition, "DeathInvestigation", deathInvestigationResources.Count == 0);
@@ -563,6 +564,20 @@ public sealed class MdiFhirMapper
             practitioner.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Phone, ContactPoint.ContactPointUse.Work, phone));
         if (GetExactValue(record, "Funeral Home: Fax", "FUNERAL_HOME_FAX", "Funeral Home Fax Number") is { } fax)
             practitioner.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Fax, ContactPoint.ContactPointUse.Work, fax));
+
+        // Map funeral home director ID fields to Practitioner.identifier
+        string? directorId = GetExactValue(record, "Funeral Home: Director ID", "Funeral Home Director ID");
+        if (!string.IsNullOrWhiteSpace(directorId))
+        {
+            string? directorIdSystem = IdentifierSystem(record.Get("Funeral Home: Director ID System", "Funeral Home Director ID System"));
+            practitioner.Identifier.Add(new Identifier
+            {
+                Use = Identifier.IdentifierUse.Usual,
+                System = directorIdSystem,
+                Value = directorId
+            });
+        }
+
         return practitioner;
     }
 

@@ -109,6 +109,111 @@ public sealed class ImportFileParserTests
     }
 
     [Fact]
+    public async Task ClassifiesMdiWorkbookFromUsecaseRowAndSkipsMetadata()
+    {
+        using MemoryStream stream = CreateSchemaWorkbook(
+            "Neutral worksheet",
+            "MDI and EDRS FHIR Profile",
+            "Decedent Name",
+            "Jane Doe");
+
+        IReadOnlyList<ImportRecord> records = await parser.ParseAsync(stream, "unknown.xlsx", CancellationToken.None);
+
+        Assert.Single(records);
+        Assert.Equal(ImportTemplateKind.MdiAndEdrs, records[0].Kind);
+        Assert.Equal("Jane Doe", records[0].Get("Decedent Name"));
+        Assert.Null(records[0].Get("Usecase"));
+    }
+
+    [Fact]
+    public async Task ClassifiesDcrWorkbookFromUsecaseRowDespiteNeutralWorksheetName()
+    {
+        using MemoryStream stream = CreateSchemaWorkbook(
+            "Neutral worksheet",
+            "Death Certificate Review (DCR) FHIR Profile",
+            "Message Reason",
+            "DC_MED_DATA_Q_REQ");
+
+        IReadOnlyList<ImportRecord> records = await parser.ParseAsync(stream, "unknown.xlsx", CancellationToken.None);
+
+        Assert.Single(records);
+        Assert.Equal(ImportTemplateKind.Dcr, records[0].Kind);
+        Assert.Equal("DC_MED_DATA_Q_REQ", records[0].Get("Message Reason"));
+        Assert.Null(records[0].Get("Usecase"));
+    }
+
+    private static MemoryStream CreateSchemaWorkbook(string worksheetName, string usecase, string element, string value)
+    {
+        MemoryStream stream = new();
+        using (XLWorkbook workbook = new())
+        {
+            IXLWorksheet sheet = workbook.AddWorksheet(worksheetName);
+            sheet.Cell(1, 1).Value = "Sections";
+            sheet.Cell(1, 2).Value = "Elements";
+            sheet.Cell(1, 4).Value = "Case 1";
+            sheet.Cell(2, 1).Value = "Usecase";
+            sheet.Cell(2, 2).Value = usecase;
+            sheet.Cell(3, 2).Value = element;
+            sheet.Cell(3, 4).Value = value;
+            workbook.SaveAs(stream);
+        }
+        stream.Position = 0;
+        return stream;
+    }
+
+    [Fact]
+    public async Task RejectsWorkbookWithConflictingUsecaseValues()
+    {
+        using MemoryStream stream = new();
+        using (XLWorkbook workbook = new())
+        {
+            IXLWorksheet sheet1 = workbook.AddWorksheet("Sheet1");
+            sheet1.Cell(1, 1).Value = "Sections";
+            sheet1.Cell(1, 2).Value = "Elements";
+            sheet1.Cell(1, 4).Value = "Case 1";
+            sheet1.Cell(2, 1).Value = "Usecase";
+            sheet1.Cell(2, 2).Value = "MDI and EDRS FHIR Profile";
+
+            IXLWorksheet sheet2 = workbook.AddWorksheet("Sheet2");
+            sheet2.Cell(1, 1).Value = "Sections";
+            sheet2.Cell(1, 2).Value = "Elements";
+            sheet2.Cell(1, 4).Value = "Case 1";
+            sheet2.Cell(2, 1).Value = "Usecase";
+            sheet2.Cell(2, 2).Value = "Death Certificate Review (DCR) FHIR Profile";
+
+            workbook.SaveAs(stream);
+        }
+        stream.Position = 0;
+
+        Exception exception = await Assert.ThrowsAsync<ImportParseException>(() =>
+            parser.ParseAsync(stream, "conflicting.xlsx", CancellationToken.None));
+        Assert.Equal("Workbook contains conflicting Usecase values.", exception.Message);
+    }
+
+    [Fact]
+    public async Task RejectsWorksheetWithConflictingUsecaseValues()
+    {
+        using MemoryStream stream = new();
+        using (XLWorkbook workbook = new())
+        {
+            IXLWorksheet sheet = workbook.AddWorksheet("Sheet1");
+            sheet.Cell(1, 1).Value = "Sections";
+            sheet.Cell(1, 2).Value = "Elements";
+            sheet.Cell(1, 4).Value = "Case 1";
+            sheet.Cell(2, 1).Value = "Usecase";
+            sheet.Cell(2, 2).Value = "MDI and EDRS FHIR Profile";
+            sheet.Cell(3, 1).Value = "Usecase";
+            sheet.Cell(3, 2).Value = "Death Certificate Review (DCR) FHIR Profile";
+            workbook.SaveAs(stream);
+        }
+        stream.Position = 0;
+
+        Exception exception = await Assert.ThrowsAsync<ImportParseException>(() =>
+            parser.ParseAsync(stream, "conflicting.xlsx", CancellationToken.None));
+        Assert.Equal("Worksheet contains conflicting Usecase values.", exception.Message);
+    }
+
+    [Fact]
     public async Task DuplicateImportRecordsYieldIdenticalResourceIdsAndFullUrls()
     {
         const string csv = "BASEFHIRID,FIRSTNAME,LASTNAME\ncase-1,Jane,Doe\n";

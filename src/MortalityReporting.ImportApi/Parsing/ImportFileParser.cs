@@ -64,10 +64,7 @@ public sealed class ImportFileParser
             using XLWorkbook workbook = new(new MemoryStream(workbookBytes));
             List<ImportRecord> schemaRecords = [];
             bool foundSchema = false;
-            ImportTemplateKind schemaKind = workbook.Worksheets.Any(sheet =>
-                ImportRecord.Normalize(sheet.Name).Contains("dcrextension") || ImportRecord.Normalize(sheet.Name).Contains("dcrtemplate"))
-                ? ImportTemplateKind.Dcr
-                : ImportTemplateKind.MdiAndEdrs;
+            ImportTemplateKind schemaKind = DetermineSchemaKind(workbook);
             foreach (IXLWorksheet worksheet in workbook.Worksheets)
             {
                 IXLRange? used = worksheet.RangeUsed();
@@ -107,6 +104,51 @@ public sealed class ImportFileParser
         }
         catch (ImportParseException) { throw; }
         catch (Exception exception) { throw new ImportParseException($"Unable to read XLSX workbook: {exception.Message}"); }
+    }
+
+    private static ImportTemplateKind DetermineSchemaKind(XLWorkbook workbook)
+    {
+        ImportTemplateKind fallbackKind = workbook.Worksheets.Any(sheet =>
+            ImportRecord.Normalize(sheet.Name).Contains("dcrextension") || ImportRecord.Normalize(sheet.Name).Contains("dcrtemplate"))
+            ? ImportTemplateKind.Dcr
+            : ImportTemplateKind.MdiAndEdrs;
+        ImportTemplateKind? usecaseKind = null;
+
+        foreach (IXLWorksheet worksheet in workbook.Worksheets)
+        {
+            IXLRange? used = worksheet.RangeUsed();
+            if (used is null) continue;
+            List<List<string?>> rows = used.Rows()
+                .Select(row => row.Cells().Select(cell => NormalizeCell(cell.Value)).ToList())
+                .ToList();
+            ImportTemplateKind? worksheetKind = DetermineKindFromUsecase(rows);
+            if (worksheetKind is null) continue;
+            if (usecaseKind is not null && usecaseKind != worksheetKind)
+                throw new ImportParseException("Workbook contains conflicting Usecase values.");
+            usecaseKind = worksheetKind;
+        }
+
+        return usecaseKind ?? fallbackKind;
+    }
+
+    private static ImportTemplateKind? DetermineKindFromUsecase(List<List<string?>> rows)
+    {
+        ImportTemplateKind? usecaseKind = null;
+        foreach (List<string?> row in rows)
+        {
+            if (ImportRecord.Normalize(Get(row, 0) ?? "") != "usecase") continue;
+            string usecase = ImportRecord.Normalize(Get(row, 1) ?? "");
+            ImportTemplateKind? rowKind = usecase.Contains("deathcertificatereview") || usecase.Contains("dcr")
+                ? ImportTemplateKind.Dcr
+                : usecase.Contains("mdi") && usecase.Contains("edrs")
+                    ? ImportTemplateKind.MdiAndEdrs
+                    : null;
+            if (rowKind is null) continue;
+            if (usecaseKind is not null && usecaseKind != rowKind)
+                throw new ImportParseException("Worksheet contains conflicting Usecase values.");
+            usecaseKind = rowKind;
+        }
+        return usecaseKind;
     }
 
     private static void AttachSignatureImages(
@@ -217,6 +259,7 @@ public sealed class ImportFileParser
         {
             string? section = Get(row, 0);
             string? element = Get(row, 1);
+            if (ImportRecord.Normalize(section ?? "") == "usecase") continue;
             if (string.IsNullOrWhiteSpace(element) && ImportRecord.Normalize(section ?? "") != "fileid") continue;
             string? key = !string.IsNullOrWhiteSpace(element) ? element : section;
             if (ImportRecord.Normalize(section ?? "") == "fileid") key = "File Id";
