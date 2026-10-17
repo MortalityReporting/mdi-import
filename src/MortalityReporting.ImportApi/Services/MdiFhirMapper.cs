@@ -1008,7 +1008,7 @@ public sealed class MdiFhirMapper
 
     private static CodeableConcept DcrReason(string? value)
     {
-        string reason = string.IsNullOrWhiteSpace(value) ? "DC_MED_DATA_Q_REQ" : value.Trim();
+        string reason = string.IsNullOrWhiteSpace(value) ? "CREM_C_REQ" : value.Trim();
         CodeableConcept? knownReason = reason.ToUpperInvariant() switch
         {
             "DC_MED_DATA_Q_REQ" => MdiCodeSystem.CsDeathCertReviewExample.DcMedDataQReq,

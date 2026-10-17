@@ -438,6 +438,45 @@ public sealed class MdiFhirMapperTests
     }
 
     [Fact]
+    public void MapsDcrRecordWithoutMessageReasonToCremCReq()
+    {
+        ImportRecord record = new(ImportTemplateKind.Dcr);
+        record.Fields["BASEFHIRID"] = "dcr-no-reason";
+        record.Fields["FIRSTNAME"] = "Jane";
+        record.Fields["LASTNAME"] = "Doe";
+        record.Fields["CERTIFIER_NAME"] = "Dr Smith";
+        // Message Reason is intentionally not set (null/empty/whitespace)
+        record.Fields["Submittor Name"] = "Alex Submitter";
+        record.Fields["Submittor Email"] = "alex@example.org";
+        record.Fields["Funeral Home Name"] = "Example Funeral Home";
+        record.Fields["Funeral Home Address: City"] = "Atlanta";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+        Assert.Equal("message", bundle["type"]?.GetValue<string>());
+
+        // Find the MessageHeader resource
+        JsonObject? messageHeaderEntry = bundle["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "MessageHeader")?.AsObject();
+        Assert.NotNull(messageHeaderEntry);
+
+        JsonObject messageHeader = messageHeaderEntry!["resource"]!.AsObject();
+        Assert.NotNull(messageHeader["reason"]);
+
+        // In FHIR, reason is a CodeableConcept which contains a list of Codings
+        // In JSON representation, this is a single object with a 'coding' array property
+        JsonObject reasonObject = messageHeader["reason"]!.AsObject();
+        Assert.NotNull(reasonObject["coding"]);
+        JsonArray? reasonCodingArray = reasonObject["coding"]!.AsArray();
+        Assert.NotNull(reasonCodingArray);
+        Assert.Single(reasonCodingArray);
+
+        JsonObject reasonCoding = reasonCodingArray![0]!.AsObject();
+        Assert.Equal(MdiCodeSystem.CsDeathCertReviewExample.CremCReq.Coding[0].System?.Trim(), reasonCoding["system"]?.GetValue<string>());
+        Assert.Equal(MdiCodeSystem.CsDeathCertReviewExample.CremCReq.Coding[0].Code, reasonCoding["code"]?.GetValue<string>());
+        Assert.Equal(MdiCodeSystem.CsDeathCertReviewExample.CremCReq.Coding[0].Display, reasonCoding["display"]?.GetValue<string>());
+    }
+
+    [Fact]
     public void MapsXlsxAddressLabelsAndAutopsyFields()
     {
         ImportRecord record = new();
