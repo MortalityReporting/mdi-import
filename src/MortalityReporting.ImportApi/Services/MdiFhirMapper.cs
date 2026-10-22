@@ -334,6 +334,8 @@ public sealed class MdiFhirMapper
             composition.CompositionMdiDcr().MdiCaseNumber = ("urn:mdi:case", mdiCase);
         if (record.Get("EDRSCASEID", "Tracking Number: EDRS File Number") is { } edrsCase)
             composition.CompositionMdiDcr().EdrsFileNumber = ("urn:mdi:edrs", edrsCase);
+        if (record.Get("Funeral Home Case Number", "Tracking Number: Funeral Home Case Number") is { } funeralHomeCase)
+            composition.CompositionMdiDcr().FuneralHomeCaseNumber = ("urn:mdi:funeral-home", funeralHomeCase);
 
         var dcrComposition = composition.CompositionMdiDcr();
         List<Resource> demographicResources = HasImportedDemographicData(record) ? Resources(patient) : [];

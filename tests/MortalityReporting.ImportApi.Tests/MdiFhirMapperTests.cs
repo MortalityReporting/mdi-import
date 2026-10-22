@@ -933,6 +933,55 @@ public sealed class MdiFhirMapperTests
     }
 
     [Fact]
+    public void MapsFuneralHomeCaseNumberToCompositionExtension()
+    {
+        ImportRecord record = new(ImportTemplateKind.Dcr);
+        record.Fields["BASEFHIRID"] = "dcr-funeral-home-case-number";
+        record.Fields["Tracking Number: Funeral Home Case Number"] = "FH-12345";
+
+        JsonObject bundle = new MdiFhirMapper().Map(record);
+
+        // Find the nested document Bundle
+        JsonObject? documentBundle = FindResourceInBundle(bundle, "Bundle");
+        Assert.NotNull(documentBundle);
+
+        // Find the Composition in the document bundle
+        JsonObject? composition = FindResourceInBundle(documentBundle!, "Composition");
+        Assert.NotNull(composition);
+
+        // Find extension URL http://hl7.org/fhir/us/mdi/StructureDefinition/Extension-tracking-number
+        // whose valueIdentifier.type.coding.code is funeral-home-case-number
+        JsonArray? extensions = composition!["extension"]?.AsArray();
+        Assert.NotNull(extensions);
+
+        JsonObject? trackingNumberExtension = extensions!
+            .FirstOrDefault(extension =>
+                ((JsonObject)extension!)["url"]?.GetValue<string>() == "http://hl7.org/fhir/us/mdi/StructureDefinition/Extension-tracking-number")?.AsObject();
+
+        Assert.NotNull(trackingNumberExtension);
+
+        // Navigate to valueIdentifier.type.coding.code
+        JsonObject valueIdentifier = ((JsonObject)trackingNumberExtension!["valueIdentifier"]!).AsObject();
+        JsonObject identifierType = ((JsonObject)valueIdentifier!["type"]!).AsObject();
+        JsonArray? codingArray = identifierType["coding"]?.AsArray();
+        Assert.NotNull(codingArray);
+        JsonObject coding = ((JsonObject)codingArray![0]!).AsObject();
+
+        // Assert coding.code is funeral-home-case-number
+        Assert.Equal("funeral-home-case-number", coding["code"]?.GetValue<string>());
+
+        // Assert valueIdentifier.system is urn:mdi:funeral-home
+        Assert.Equal("urn:mdi:funeral-home", valueIdentifier["system"]?.GetValue<string>());
+
+        // Assert value is FH-12345 from input
+        Assert.Equal("FH-12345", valueIdentifier["value"]?.GetValue<string>());
+
+        // Assert coding.system/display match http://hl7.org/fhir/us/mdi/CodeSystem/cs-mdi-codes / Funeral Home Case Number
+        Assert.Equal("http://hl7.org/fhir/us/mdi/CodeSystem/cs-mdi-codes", coding["system"]?.GetValue<string>());
+        Assert.Equal("Funeral Home Case Number", coding["display"]?.GetValue<string>());
+    }
+
+    [Fact]
     public void CodedConceptsOmitEmptyText()
     {
         ImportRecord record = new();
