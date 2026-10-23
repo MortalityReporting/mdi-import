@@ -707,6 +707,7 @@ public sealed class MdiFhirMapperTests
         record.Fields["Funeral Home: Postal Code"] = "30303";
         record.Fields["Funeral Home: Phone"] = "555-0100";
         record.Fields["Funeral Home: Fax"] = "555-0101";
+        record.Fields["Funeral Home: Email"] = "director@example.org";
         record.SignatureData = [1, 2, 3];
         record.SignatureContentType = "image/jpeg";
 
@@ -745,6 +746,11 @@ public sealed class MdiFhirMapperTests
         Assert.Contains("555-0100", practitionerJson);
         Assert.Contains("555-0101", practitionerJson);
 
+        JsonObject practitionerEmail = practitioner["telecom"]!.AsArray()
+            .First(point => point!["system"]?.GetValue<string>() == "email")!.AsObject();
+        Assert.Equal("director@example.org", practitionerEmail["value"]?.GetValue<string>());
+        Assert.Equal("work", practitionerEmail["use"]?.GetValue<string>());
+
         // Assert that Practitioner has identifier with NPI system and value
         JsonArray? practitionerIdentifiers = practitioner["identifier"]?.AsArray();
         Assert.NotNull(practitionerIdentifiers);
@@ -771,6 +777,15 @@ public sealed class MdiFhirMapperTests
         string documentBundleJson = JsonSerializer.Serialize(documentBundle);
         Assert.Contains("Director Funeral Home", documentBundleJson);
         Assert.Contains("Organization", documentBundleJson);
+
+        JsonObject? organizationEntry = documentBundle!["entry"]!.AsArray()
+            .FirstOrDefault(entry => entry!["resource"]!["resourceType"]?.GetValue<string>() == "Organization")?.AsObject();
+        Assert.NotNull(organizationEntry);
+        JsonObject organization = organizationEntry!["resource"]!.AsObject();
+        JsonObject organizationEmail = organization["telecom"]!.AsArray()
+            .First(point => point!["system"]?.GetValue<string>() == "email")!.AsObject();
+        Assert.Equal("director@example.org", organizationEmail["value"]?.GetValue<string>());
+        Assert.Equal("work", organizationEmail["use"]?.GetValue<string>());
     }
 
     [Fact]

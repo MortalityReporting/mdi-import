@@ -433,7 +433,7 @@ public sealed class MdiFhirMapper
         HasExactValue(record,
             "Funeral Home: Name", "Funeral Home: Phone", "Funeral Home: Fax", "Funeral Home: Street",
             "Funeral Home: City", "Funeral Home: County", "Funeral Home: State, U.S. Territory or Canadian Province",
-            "Funeral Home: Postal Code");
+            "Funeral Home: Postal Code", "Funeral Home: Email");
 
     private static bool HasAnyValue(ImportRecord record, params string[] names) => names.Any(name => record.Get(name) is not null);
 
@@ -566,6 +566,8 @@ public sealed class MdiFhirMapper
             practitioner.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Phone, ContactPoint.ContactPointUse.Work, phone));
         if (GetExactValue(record, "Funeral Home: Fax", "FUNERAL_HOME_FAX", "Funeral Home Fax Number") is { } fax)
             practitioner.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Fax, ContactPoint.ContactPointUse.Work, fax));
+        if (GetExactValue(record, "Funeral Home: Email") is { } email)
+            practitioner.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Email, ContactPoint.ContactPointUse.Work, email));
 
         // Map funeral home director ID fields to Practitioner.identifier
         string? directorId = GetExactValue(record, "Funeral Home: Director ID", "Funeral Home Director ID");
@@ -591,13 +593,16 @@ public sealed class MdiFhirMapper
         Address? address = BuildAddress(record, "Funeral Home Address", Address.AddressUse.Work);
         string? phone = GetExactValue(record, "Funeral Home: Phone", "FUNERAL_HOME_PHONE", "Funeral Home Phone Number");
         string? fax = GetExactValue(record, "Funeral Home: Fax", "FUNERAL_HOME_FAX", "Funeral Home Fax Number");
-        if (name is null && address is null && phone is null && fax is null) return null;
+        string? email = GetExactValue(record, "Funeral Home: Email");
+        if (name is null && address is null && phone is null && fax is null && email is null) return null;
         Organization organization = GaTech.Chai.Vrdr.VrdrFuneralHome.Create(name ?? "Funeral home");
         organization.Id = id;
         if (address is not null) organization.Address = [address];
         organization.Telecom = [];
         if (phone is not null) organization.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Phone, ContactPoint.ContactPointUse.Work, phone));
         if (fax is not null) organization.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Fax, ContactPoint.ContactPointUse.Work, fax));
+        if (email is not null)
+            organization.Telecom.Add(new ContactPoint(ContactPoint.ContactPointSystem.Email, ContactPoint.ContactPointUse.Work, email));
         return organization;
     }
 
